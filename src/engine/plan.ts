@@ -1,0 +1,262 @@
+// Orchestration: owns the persisted state shape, (re)generates the plan, reconciles completed
+// activities, applies readiness-driven adaptations and builds the payload the UI renders.
+import type { Activity, Availability, Checkin, Goal, Profile, Race, SeasonWeek, Session, Sport, Wellness, Workout } from './types.ts';
+import { addDays, diffDays, mondayOf } from './dates.ts';
+import { buildSeason } from './season.ts';
+import { buildWeek } from './week.ts';
+import { defaultAvailability, defaultProfile } from './defaults.ts';
+import { assessReadiness, monotony, type Readiness } from './readiness.ts';
+import { finalize, toIcuText, viewWorkout, zoneTable } from './zones.ts';
+import { bike, run, swim } from './workouts.ts';
+import { strengthProgramme } from './strength.ts';
+
+export const DETAIL_WEEKS = 4;
+
+export interface State {
+  profile: Profile;
+  availability: Availability;
+  races: Race[];
+  goals: Goal[];
+  library: { id: string; workout: Workout }[];
+  season: { weeks: SeasonWeek[]; warnings: string[]; generatedAt: string } | null;
+  sessions: Session[];
+  weekWarnings: Record<string, string[]>;
+  checkins: Record<string, Checkin>;
+  wellness: Wellness[];
+  activities: Activity[];
+  intervals: {
+    apiKey?: string; athleteId?: string; athleteName?: string;
+    lastSync?: string; lastPush?: string; lastError?: string;
+  };
+}
+
+export const emptyState = (): State => ({
+  profile: defaultProfile(), availability: defaultAvailability(), races: [], goals: [], library: [],
+  season: null, sessions: [], weekWarnings: {}, checkins: {}, wellness: [], activities: [], intervals: {},
+});
+
+export const uid = (prefix: string) => `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+
+export function currentCtl(s: State): number | undefined {
+  const w = [...s.wellness].sort((a, b) => a.date.localeCompare(b.date)).filter((x) => x.ctl != null).at(-1);
+  return w?.ctl;
+}
+
+/**
+ * Regenerate the season and the detailed sessions for the next DETAIL_WEEKS weeks.
+ * The past is never rewritten; locked sessions (custom, moved, adapted, completed) always survive.
+ *  - 'future': keep the current week if it already has sessions, rebuild the following weeks
+ *  - 'week':   also rebuild the rest of the current week from today
+ */
+export function generate(s: State, today: string, scope: 'future' | 'week' = 'future'): void {
+  const season = buildSeason({ today, profile: s.profile, availability: s.availability, races: s.races, ctl: currentCtl(s) });
+  s.season = { ...season, generatedAt: new Date().toISOString() };
+  const weekStart = mondayOf(today);
+  for (let i = 0; i < Math.min(DETAIL_WEEKS, season.weeks.length); i++) {
+    const wk = season.weeks[i];
+    const end = addDays(wk.start, 6);
+    const inWeek = (x: Session) => x.date >= wk.start && x.date <= end;
+    const existing = s.sessions.filter(inWeek);
+    if (wk.start === weekStart && scope === 'future' && existing.length) continue;
+    const keep = existing.filter((x) => x.locked || x.status !== 'planned' || x.date < today);
+    const built = buildWeek(wk, s.profile, s.availability);
+    const fresh = built.sessions.filter((n) => {
+      if (n.date < today) return false;
+      if (keep.some((k) => k.date === n.date && k.sport === n.sport)) return false;
+      // Don't schedule a second long/key/test session of a sport that was already done or pinned this week.
+      if (['long', 'key', 'test'].includes(n.role) && keep.some((k) => k.sport === n.sport && k.role === n.role && k.status !== 'skipped')) return false;
+      return true;
+    });
+    s.sessions = s.sessions.filter((x) => !inWeek(x)).concat(keep, fresh);
+    s.weekWarnings[wk.start] = built.warnings;
+  }
+  for (const k of Object.keys(s.weekWarnings)) if (k < weekStart) delete s.weekWarnings[k];
+  s.sessions.sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/** Roll the plan forward automatically when a new week starts. */
+export function ensureHorizon(s: State, today: string): boolean {
+  if (!s.season) return false;
+  if (s.season.weeks[0]?.start === mondayOf(today)) return false;
+  generate(s, today, 'future');
+  return true;
+}
+
+/** Mark planned sessions done when a matching activity (same day, same sport) exists. */
+export function reconcile(s: State): number {
+  let n = 0;
+  const used = new Set(s.sessions.map((x) => x.actual?.activityId).filter(Boolean));
+  for (const a of s.activities) {
+    if (used.has(a.id) || a.sport === 'other') continue;
+    const cands = s.sessions.filter((x) => x.date === a.date && x.sport === a.sport && !x.actual && x.status !== 'skipped');
+    if (!cands.length) continue;
+    // Closest planned duration wins when there are two sessions of a sport on one day.
+    const best = cands.sort((x, y) => Math.abs(x.workout.durationMin - a.durationMin) - Math.abs(y.workout.durationMin - a.durationMin))[0];
+    best.status = 'done';
+    best.locked = true;
+    best.actual = { tss: a.tss, durationMin: a.durationMin, activityId: a.id, name: a.name };
+    used.add(a.id);
+    n++;
+  }
+  return n;
+}
+
+function easier(x: Session, p: Profile, level: 'adjust' | 'recover'): Workout | null {
+  const d = x.workout.durationMin;
+  if (x.sport === 'bike') return level === 'recover' ? bike.recovery(Math.min(d, 40), 0, p) : bike.endurance(Math.min(d, 75), 0, p);
+  if (x.sport === 'run') return level === 'recover' ? null : run.easy(Math.min(d, 45), -1, p);
+  if (x.sport === 'swim') return swim.technique(Math.min(d, level === 'recover' ? 30 : 45), 0, p);
+  return level === 'recover' ? null : x.workout;
+}
+
+/**
+ * Apply today's readiness verdict to today's sessions.
+ *  adjust:  swap a hard session with tomorrow's easy session of the same sport when that keeps
+ *           hard days apart; otherwise replace it with its aerobic equivalent.
+ *  recover: everything becomes recovery or is skipped.
+ */
+export function applyReadiness(s: State, today: string, r: Readiness): string[] {
+  const changes: string[] = [];
+  if (r.status !== 'adjust' && r.status !== 'recover') return changes;
+  const p = s.profile;
+  const on = (d: string) => s.sessions.filter((x) => x.date === d && x.status === 'planned');
+  for (const x of on(today)) {
+    if (x.sport === 'race') continue;
+    const isHard = x.workout.hard || x.role === 'test';
+    if (r.status === 'adjust') {
+      if (!isHard) continue;
+      const tomorrow = addDays(today, 1);
+      const swap = on(tomorrow).find((y) => y.sport === x.sport && !y.workout.hard && y.role === 'easy');
+      const clash = on(tomorrow).some((y) => y.workout.hard) || on(addDays(today, 2)).some((y) => y.workout.hard || y.sport === 'race');
+      if (swap && !clash && x.role !== 'brick') {
+        swap.date = today; x.date = tomorrow;
+        swap.locked = x.locked = true;
+        x.origin = 'adapted'; x.adaptedNote = `Moved from ${today}: readiness was low.`;
+        changes.push(`Moved “${x.workout.name}” to tomorrow and brought “${swap.workout.name}” forward.`);
+        continue;
+      }
+    }
+    const w = easier(x, p, r.status);
+    const before = x.workout.name;
+    if (!w) {
+      x.status = 'skipped'; x.locked = true; x.origin = 'adapted';
+      x.adaptedNote = 'Skipped: recovery day.';
+      changes.push(`Skipped “${before}”.`);
+    } else if (w !== x.workout) {
+      x.workout = w; x.locked = true; x.origin = 'adapted';
+      x.adaptedNote = `Replaced “${before}”: readiness ${r.status === 'recover' ? 'called for recovery' : 'was low'}.`;
+      changes.push(`Replaced “${before}” with “${w.name}”.`);
+    }
+  }
+  s.sessions.sort((a, b) => a.date.localeCompare(b.date));
+  return changes;
+}
+
+const isHardStep = (sport: Sport, f: number) => f >= (sport === 'bike' ? 0.88 : sport === 'run' ? 0.9 : 0.97);
+
+/** Validate and normalise a user-built workout. */
+export function customWorkout(input: any, p: Profile): Workout {
+  const sport: Sport = ['swim', 'bike', 'run', 'strength'].includes(input?.sport) ? input.sport : 'bike';
+  const name = String(input?.name || 'Custom workout').slice(0, 80);
+  const description = String(input?.description || '').slice(0, 2000);
+  if (sport === 'strength') {
+    const durationMin = clampNum(input?.durationMin, 10, 180, 45);
+    return { sport, code: 'custom', name, category: 'strength', hard: false, blocks: [], exercises: [], description, durationMin, tss: Math.round(durationMin * 0.45), custom: true };
+  }
+  const blocks = (Array.isArray(input?.blocks) ? input.blocks : []).slice(0, 30).map((b: any, i: number) => ({
+    name: String(b?.name || `Block ${i + 1}`).replace(/[^\p{L} -]/gu, '').trim().slice(0, 40) || `Block`,
+    repeat: Math.round(clampNum(b?.repeat, 1, 100, 1)),
+    steps: (Array.isArray(b?.steps) ? b.steps : []).slice(0, 20).map((st: any) => {
+      const kind = ['warmup', 'work', 'recovery', 'cooldown', 'rest'].includes(st?.kind) ? st.kind : 'work';
+      const lo = kind === 'rest' ? 0 : clampNum(st?.lo, 0.3, 2.5, 0.7);
+      const hi = kind === 'rest' ? 0 : Math.max(lo, clampNum(st?.hi, 0.3, 2.5, lo));
+      const base = { kind, lo, hi, ramp: !!st?.ramp, cue: st?.cue ? String(st.cue).slice(0, 60) : undefined };
+      return sport === 'swim' && kind !== 'rest' && st?.meters
+        ? { ...base, meters: Math.round(clampNum(st.meters, 25, 10000, 100) / 25) * 25 }
+        : { ...base, secs: Math.round(clampNum(st?.secs, 5, 6 * 3600, 60)) };
+    }),
+  })).filter((b: any) => b.steps.length);
+  if (!blocks.length) throw new Error('A workout needs at least one step.');
+  const hard = blocks.some((b: any) => b.steps.some((st: any) => st.kind === 'work' && isHardStep(sport, st.hi)));
+  return finalize({ sport, code: 'custom', name, category: hard ? 'threshold' : 'endurance', hard, blocks, description, durationMin: 0, tss: 0, custom: true }, p);
+}
+function clampNum(v: any, lo: number, hi: number, dflt: number) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : dflt;
+}
+
+const renderWorkout = (w: Workout, p: Profile) => {
+  const f = finalize(w, p);
+  return { ...f, view: viewWorkout(f, p), icu: toIcuText(f, p) };
+};
+
+/** Everything the UI needs, with absolute targets resolved against current thresholds. */
+export function viewState(s: State, today: string) {
+  const p = s.profile;
+  const readiness = assessReadiness(today, s.wellness, s.checkins[today]);
+  const sessions = s.sessions
+    .filter((x) => x.date >= addDays(mondayOf(today), -14))
+    .map((x) => ({ ...x, workout: renderWorkout(x.workout, p) }));
+
+  const weekStats = (s.season?.weeks ?? []).slice(0, DETAIL_WEEKS).map((w) => {
+    const list = sessions.filter((x) => x.date >= w.start && x.date <= addDays(w.start, 6) && x.status !== 'skipped');
+    const acts = s.activities.filter((a) => a.date >= w.start && a.date <= addDays(w.start, 6));
+    const bySport: Record<string, number> = {};
+    for (const x of list) bySport[x.sport] = (bySport[x.sport] ?? 0) + x.workout.durationMin;
+    return {
+      start: w.start,
+      plannedTss: list.reduce((t, x) => t + x.workout.tss, 0),
+      plannedMin: list.reduce((t, x) => t + x.workout.durationMin, 0),
+      doneTss: Math.round(acts.reduce((t, a) => t + a.tss, 0)),
+      doneMin: Math.round(acts.reduce((t, a) => t + a.durationMin, 0)),
+      keyTotal: list.filter((x) => ['key', 'long', 'test', 'race'].includes(x.role)).length,
+      keyDone: list.filter((x) => ['key', 'long', 'test', 'race'].includes(x.role) && x.status === 'done').length,
+      bySport,
+    };
+  });
+
+  const daily: number[] = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = addDays(today, -i);
+    daily.push(s.activities.filter((a) => a.date === d).reduce((t, a) => t + a.tss, 0));
+  }
+  const fitness = [...s.wellness].filter((w) => w.ctl != null).sort((a, b) => a.date.localeCompare(b.date)).slice(-120)
+    .map((w) => ({ date: w.date, ctl: w.ctl!, atl: w.atl ?? w.ctl! }));
+
+  const needs: string[] = [];
+  if (!p.ftp && p.bikeTarget === 'power') needs.push('bike FTP');
+  if (p.runTarget === 'power' && !p.runPower) needs.push('run threshold power');
+  if (p.runTarget === 'pace' && !p.runPaceSecPerKm) needs.push('run threshold pace');
+  if (!p.cssSecPer100) needs.push('swim CSS');
+
+  const nextRace = s.races.filter((r) => r.date >= today).sort((a, b) => a.date.localeCompare(b.date))[0];
+  return {
+    today, profile: p, availability: s.availability, races: s.races, goals: s.goals,
+    library: s.library.map((l) => ({ id: l.id, workout: renderWorkout(l.workout, p) })),
+    season: s.season, sessions, weekStats, weekWarnings: s.weekWarnings,
+    readiness, checkin: s.checkins[today] ?? null,
+    intervals: {
+      connected: !!s.intervals.apiKey, athleteId: s.intervals.athleteId, athleteName: s.intervals.athleteName,
+      lastSync: s.intervals.lastSync, lastPush: s.intervals.lastPush, lastError: s.intervals.lastError,
+    },
+    fitness, ctl: currentCtl(s) ?? null, monotony: monotony(daily),
+    activities: s.activities.filter((a) => a.date >= addDays(today, -28)),
+    zones: zoneTable(p), strength: strengthProgramme(p), needs,
+    nextRace: nextRace ? { ...nextRace, days: diffDays(nextRace.date, today) } : null,
+  };
+}
+
+/** iCalendar export of planned sessions (all-day events) for any calendar app. */
+export function toIcs(s: State, today: string): string {
+  const esc = (t: string) => t.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/([,;])/g, '\\$1');
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//triathlon-coach//EN', 'CALSCALE:GREGORIAN'];
+  for (const x of s.sessions.filter((q) => q.date >= today && q.status === 'planned')) {
+    const d = x.date.replace(/-/g, '');
+    lines.push('BEGIN:VEVENT', `UID:${x.id}@triathlon-coach`, `DTSTAMP:${d}T000000Z`, `DTSTART;VALUE=DATE:${d}`,
+      `DTEND;VALUE=DATE:${addDays(x.date, 1).replace(/-/g, '')}`,
+      `SUMMARY:${esc(`${x.workout.name} (${x.workout.durationMin} min)`)}`,
+      `DESCRIPTION:${esc(toIcuText(finalize(x.workout, s.profile), s.profile))}`, 'END:VEVENT');
+  }
+  lines.push('END:VCALENDAR');
+  return lines.join('\r\n');
+}
