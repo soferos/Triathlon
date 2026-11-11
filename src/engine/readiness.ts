@@ -89,7 +89,7 @@ export function assessReadiness(today: string, wellness: Wellness[], checkin?: C
   if (!signals.length) {
     return { status: 'unknown', score: null, headline: 'No readiness data yet', advice: 'Connect Intervals.icu (HRV, resting HR, sleep) or log a check-in. Until then: train as planned.', signals };
   }
-  const score = Math.max(0, 100 - penalty);
+  const score = forced ? Math.min(30, Math.max(0, 100 - penalty)) : Math.max(0, 100 - penalty);
   const status = forced ?? (score >= 75 ? 'go' : score >= 50 ? 'adjust' : 'recover');
   const text = {
     go: ['Green light', 'Execute today as written. Hit the targets, not more.'],

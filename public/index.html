@@ -1,1 +1,69 @@
-<!doctype html><title>x</title>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Triathlon Coach</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="app">
+    <nav id="nav"></nav>
+    <main id="main"><p class="muted">Loading…</p></main>
+  </div>
+  <dialog id="dlg"></dialog>
+  <div id="toast" role="status"></div>
+
+  <template id="method">
+    <div class="card">
+      <h2>How the plan thinks</h2>
+      <p>This is built for a trained athlete. It assumes you can handle real work, and it spends your limited recovery capacity where the evidence says it pays. Nothing here is beginner scaffolding; the only conservative element is the return-to-training block, and that is deliberate: aerobic fitness returns faster than tendon, bone and connective-tissue tolerance, so load comes back in the order <b>frequency → volume → intensity</b>, with running intensity last.</p>
+      <ul class="clean">
+        <li><b>Periodisation backwards from A-races.</b> Rebuild → base → build → specific → taper → race → transition. B-races get a short freshen-up and replace key sessions; C-races are trained through.</li>
+        <li><b>Intensity distribution.</b> Mostly low intensity year-round (≈75–85% of time below the first threshold), pyramidal in base/build, shifting towards race-specific and polarised work close to the race.</li>
+        <li><b>Load by fitness, not by template.</b> Weekly load is derived from your chronic training load (CTL) and a ramp of ≈3–5 CTL points/week, capped by your availability. After each Intervals.icu sync the plan re-anchors to what you actually did — missed weeks lower the next target, they are never “made up”.</li>
+        <li><b>Recovery weeks</b> every 3rd or 4th week (2:1 for masters or by choice), with threshold tests at the end of selected recovery weeks so targets stay current.</li>
+        <li><b>Hard days hard, easy days easy.</b> Key sessions are spaced, strength is consolidated onto hard days, and one day is kept fully free.</li>
+        <li><b>Durability.</b> Long sessions carry quality late (tempo and race-pace blocks on tired legs), because races are decided by what your threshold looks like after hours of work.</li>
+        <li><b>Power first.</b> Bike and run sessions are prescribed in watts (run power removes the terrain and wind noise that pace has); pace and heart rate are available per sport. Swims are prescribed from critical swim speed.</li>
+        <li><b>Daily readiness.</b> 7-day HRV trend against your own normal range, resting HR, sleep, form and how you feel decide whether to execute, shift or replace today’s session.</li>
+        <li><b>Heavy strength.</b> Two sessions/week of low-rep, high-load work in base/build, one in season. It improves economy and durability; it does not add meaningful mass at endurance volumes.</li>
+        <li><b>Fuel the work.</b> High carbohydrate for key and long sessions (60–90+ g/h), and enough total energy. Chronic low energy availability is the fastest way back to another lay-off.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h2>Coming back from a health break</h2>
+      <p>The plan cannot see your medical history. If your break was for anything cardiac, respiratory, bone-stress or hormonal, get explicit clearance for high-intensity work from your physician before the plan’s first VO2max block — then train without second-guessing it. Report symptoms in the daily check-in; the plan will pull intensity until you are 48 h symptom-free.</p>
+    </div>
+    <div class="card">
+      <h2>Evidence base</h2>
+      <ul class="clean refs">
+        <li>Seiler S. What is best practice for training intensity and duration distribution in endurance athletes? <i>Int J Sports Physiol Perform</i> 2010.</li>
+        <li>Stöggl T, Sperlich B. Polarized training has greater impact on key endurance variables than threshold, high intensity, or high volume training. <i>Front Physiol</i> 2014.</li>
+        <li>Casado A, et al. Training periodization, methods, intensity distribution, and volume in highly trained and elite distance runners. <i>Int J Sports Physiol Perform</i> 2022.</li>
+        <li>Seiler S, et al. Adaptations to aerobic interval training: interactive effects of exercise intensity and total work duration. <i>Scand J Med Sci Sports</i> 2013. (4×8 min)</li>
+        <li>Helgerud J, et al. Aerobic high-intensity intervals improve VO2max more than moderate training. <i>Med Sci Sports Exerc</i> 2007.</li>
+        <li>Rønnestad BR, et al. Superior performance improvements in elite cyclists following short-interval vs effort-matched long-interval training. <i>Scand J Med Sci Sports</i> 2020. (30/15 s)</li>
+        <li>Maunder E, et al. The importance of “durability” in the physiological profiling of endurance athletes. <i>Sports Med</i> 2021.</li>
+        <li>Bosquet L, et al. Effects of tapering on performance: a meta-analysis. <i>Med Sci Sports Exerc</i> 2007.</li>
+        <li>Mujika I, Padilla S. Detraining: loss of training-induced physiological and performance adaptations. <i>Sports Med</i> 2000.</li>
+        <li>Rønnestad BR, Mujika I. Optimizing strength training for running and cycling endurance performance: a review. <i>Scand J Med Sci Sports</i> 2014.</li>
+        <li>Blagrove RC, Howatson G, Hayes PR. Effects of strength training on the physiological determinants of middle- and long-distance running performance. <i>Sports Med</i> 2018.</li>
+        <li>Lauersen JB, et al. The effectiveness of exercise interventions to prevent sports injuries. <i>Br J Sports Med</i> 2014.</li>
+        <li>Plews DJ, et al. Training adaptation and heart rate variability in elite endurance athletes: opening the door to effective monitoring. <i>Sports Med</i> 2013.</li>
+        <li>Kiviniemi AM, et al. Endurance training guided individually by daily heart rate variability measurements. <i>Eur J Appl Physiol</i> 2007.</li>
+        <li>Javaloyes A, et al. Training prescription guided by heart-rate variability in cycling. <i>Int J Sports Physiol Perform</i> 2019.</li>
+        <li>Foster C. Monitoring training in athletes with reference to overtraining syndrome. <i>Med Sci Sports Exerc</i> 1998. (monotony, strain)</li>
+        <li>Impellizzeri FM, et al. Acute:chronic workload ratio: conceptual issues and fundamental pitfalls. <i>Int J Sports Physiol Perform</i> 2020. (why this app does not use ACWR)</li>
+        <li>Wakayoshi K, et al. Determination and validity of critical velocity as an index of swimming performance. <i>Eur J Appl Physiol</i> 1992.</li>
+        <li>Jeukendrup AE. A step towards personalized sports nutrition: carbohydrate intake during exercise. <i>Sports Med</i> 2014.</li>
+        <li>Impey SG, et al. Fuel for the work required: a theoretical framework for carbohydrate periodization. <i>Sports Med</i> 2018.</li>
+        <li>Mountjoy M, et al. 2023 IOC consensus statement on Relative Energy Deficiency in Sport (REDs). <i>Br J Sports Med</i> 2023.</li>
+      </ul>
+      <p class="muted small">Training-load model: Banister impulse–response as implemented in the performance management chart (CTL 42-day, ATL 7-day). Load per session is estimated as hours × IF² × 100.</p>
+    </div>
+  </template>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
