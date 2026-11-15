@@ -91,11 +91,20 @@ export function buildWeek(week: SeasonWeek, profile: Profile, availability: Avai
     [fs, fb, fr] = [f.swim, f.bike, f.run];
   }
   if (phase === 'rebuild') { fb += fr * 0.15; fr *= 0.85; } // re-load impact tolerance gradually
+  // Two-discipline targets: in the specific block, taper and race week the missing discipline drops
+  // to maintenance and its time goes to the two that are raced. Earlier phases stay full triathlon.
+  const closing = phase === 'specific' || phase === 'taper' || phase === 'race';
+  const duathlon = closing && (week.targetRace === 'duathlon' || week.targetRace === 'duathlonSprint');
+  const aquathlon = closing && week.targetRace === 'aquathlon';
+  if (duathlon) { const cut = fs * 0.6; fs -= cut; fr += cut; } // run-bike-run: the freed swim time goes to running
+  if (aquathlon) { const cut = fb * 0.4; fb -= cut; fs += cut * 0.4; fr += cut * 0.6; }
   let nSwim = hours < 7 ? 2 : hours < 12 ? 3 : 4;
-  if (phase === 'race') nSwim = 2;
+  if (phase === 'race') nSwim = duathlon ? 0 : 2;
+  else if (duathlon) nSwim = Math.min(nSwim, 1);
   if (phase === 'transition') nSwim = 1;
   nSwim = Math.min(nSwim, poolDays, Math.max(1, Math.floor((total * fs) / 30)));
-  if (poolDays === 0) {
+  if (poolDays === 0 && nSwim === 0 && duathlon) { fr += fs; fs = 0; }
+  else if (poolDays === 0) {
     nSwim = 0;
     warnings.push(`Week of ${week.start}: no pool access on any available day — swim time moved to bike/run.`);
     fb += fs * 0.6; fr += fs * 0.4; fs = 0;
@@ -207,12 +216,23 @@ export function buildWeek(week: SeasonWeek, profile: Profile, availability: Avai
 
   // A B/C race replaces a key session of the week rather than being stacked on top.
   if (sideRace) {
-    const sport: Sport = sideRace.type === 'run10k' || sideRace.type === 'halfMarathon' || sideRace.type === 'marathon' ? 'run' : 'bike';
+    const sport: Sport = sideRace.type === 'run10k' || sideRace.type === 'halfMarathon' || sideRace.type === 'marathon' || sideRace.type === 'aquathlon' ? 'run' : 'bike';
     const i = specs.findIndex((s) => s.role === 'key' && s.sport === sport);
     if (i >= 0) specs.splice(i, 1);
     if (sideRace.priority === 'B') {
       const j = specs.findIndex((s) => s.role === 'key' && s.hard && s.sport !== 'swim');
       if (j >= 0) specs.splice(j, 1);
+    }
+  }
+
+  // A duathlon block keeps one short maintenance swim, not a full session.
+  if (duathlon) for (const sp of specs) if (sp.sport === 'swim') sp.max = Math.min(sp.max, 45);
+  // The raced disciplines may run longer than their triathlon ceilings to take up the freed time
+  // (a duathlon has two runs; an aquathlon is decided on the run).
+  if (duathlon || aquathlon) {
+    for (const sp of specs) {
+      if (sp.role === 'brick' || sp.role === 'opener' || sp.hard) continue; // interval sessions keep their length
+      if (sp.sport === 'run' || (aquathlon && sp.sport === 'swim')) sp.max = Math.round(sp.max * 1.25);
     }
   }
 
@@ -337,17 +357,26 @@ export function buildWeek(week: SeasonWeek, profile: Profile, availability: Avai
   }
 
   // Pass 2: supporting aerobic volume fills what is left.
-  runPass([(s) => s.sport === 'swim', (s) => s.role === 'easy']);
+  // With a two-discipline target the runs claim the remaining days before the easy rides do.
+  runPass([(s) => s.sport === 'swim', (s) => (duathlon || aquathlon) && s.role === 'easy' && s.sport === 'run', (s) => s.role === 'easy']);
 
   // Top up: if clipping or dropped sessions left the week short, extend long/easy sessions where the day allows.
   let deficit = hours * 60 - days.reduce((t, x) => t + x.used, 0);
   const stretch = specs.filter((s) => s.day != null && !s.hard && s.role !== 'opener' && s.role !== 'brick')
     .sort((a, b) => (a.role === 'long' ? 0 : 1) - (b.role === 'long' ? 0 : 1));
-  for (const s of stretch) {
-    if (deficit < 10) break;
-    const day = days[s.day!];
-    const extra = Math.floor(Math.min(deficit, s.max - s.dur, day.cap - day.used) / 5) * 5;
-    if (extra >= 5) { s.dur += extra; day.used += extra; deficit -= extra; }
+  // First give time back to the discipline it was budgeted for; then, for a full triathlon week,
+  // let any discipline absorb what is still missing. Two-discipline targets skip the second pass
+  // so the reduced discipline is not quietly topped back up.
+  const budget: Record<string, number> = { swim: total * fs, bike: total * fb, run: total * fr };
+  const placedIn = (sport: string) => specs.filter((x) => x.day != null && x.sport === sport).reduce((t, x) => t + x.dur, 0);
+  for (const pass of duathlon || aquathlon ? ['budget'] : ['budget', 'any']) {
+    for (const s of stretch) {
+      if (deficit < 10) break;
+      const day = days[s.day!];
+      const room = pass === 'budget' ? (budget[s.sport] ?? 0) - placedIn(s.sport) : Infinity;
+      const extra = Math.floor(Math.min(deficit, room, s.max - s.dur, day.cap - day.used) / 5) * 5;
+      if (extra >= 5) { s.dur += extra; day.used += extra; deficit -= extra; }
+    }
   }
   if (deficit > hours * 60 * 0.12 && phase !== 'race') {
     warnings.push(`Week of ${week.start}: availability fits ${((hours * 60 - deficit) / 60).toFixed(1)} h of the ${hours} h target — add time on some days to hit the planned load.`);

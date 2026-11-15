@@ -187,7 +187,7 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
     'PUT /api/races': async (req) => {
       const b = await body(req);
       if (!Array.isArray(b)) throw new HttpError(400, 'Expected a list');
-      const types = ['sprint', 'olympic', 'half', 'full', 'run10k', 'halfMarathon', 'marathon', 'bikeEvent', 'other'];
+      const types = ['sprint', 'olympic', 'half', 'full', 'duathlonSprint', 'duathlon', 'aquathlon', 'run10k', 'halfMarathon', 'marathon', 'bikeEvent', 'other'];
       s().races = b.filter((r: any) => isDate(r?.date) && r?.name).slice(0, 40).map((r: any) => ({
         id: r.id || uid('r'), name: String(r.name).slice(0, 80), date: r.date,
         type: types.includes(r.type) ? r.type : 'olympic', priority: ['A', 'B', 'C'].includes(r.priority) ? r.priority : 'B',

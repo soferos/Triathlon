@@ -215,3 +215,26 @@ test('reconcile: matches a session done on another day, records what was done, a
   assert.equal(reconcile(s), 0);
   assert.equal(done.actual!.tss, 140);
 });
+
+test('duathlon and aquathlon targets: accepted as races and shift the discipline mix near the race', () => {
+  const p = { ...profile(), comeback: { active: false, weeksOff: 0 } }, a = defaultAvailability();
+  const mins = (type: Race['type'], phase: string) => {
+    const { weeks } = buildSeason({ today: TODAY, profile: p, availability: a, races: [{ id: 'x', name: 'Target', date: '2027-06-27', type, priority: 'A' }], ctl: 60 });
+    const wk = weeks.find((w) => w.phase === phase && !w.recovery)!;
+    assert.equal(wk.targetRace, type);
+    const out = { swim: 0, bike: 0, run: 0, strength: 0, race: 0 };
+    const { sessions } = buildWeek(wk, p, a);
+    for (const s of sessions) out[s.sport] += s.workout.durationMin;
+    return { ...out, raceTss: sessions.find((s) => s.sport === 'race')?.workout.tss };
+  };
+  const tri = mins('sprint', 'specific'), du = mins('duathlonSprint', 'specific'), aq = mins('aquathlon', 'specific');
+  assert.ok(du.swim < tri.swim * 0.7 && du.swim > 0, `duathlon keeps a maintenance swim: ${du.swim} vs ${tri.swim}`);
+  assert.ok(du.run > tri.run, 'duathlon adds run time');
+  assert.ok(aq.bike < tri.bike * 0.8 && aq.swim >= tri.swim && aq.run > tri.run, `aquathlon: ${JSON.stringify(aq)} vs ${JSON.stringify(tri)}`);
+  // base phase stays full triathlon training
+  assert.deepEqual(mins('duathlon', 'base'), mins('olympic', 'base'));
+  const raceWeek = mins('duathlon', 'race');
+  assert.equal(raceWeek.swim, 0);
+  assert.equal(raceWeek.raceTss, 170);
+  assert.equal(mins('aquathlon', 'race').raceTss, 55);
+});

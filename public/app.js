@@ -38,7 +38,7 @@ const parseClock = (t) => {
 const SPORT = { swim: 'Swim', bike: 'Bike', run: 'Run', strength: 'Strength', race: 'Race' };
 const PHASE = { rebuild: 'Rebuild', base: 'Base', build: 'Build', specific: 'Specific', taper: 'Taper', race: 'Race', transition: 'Transition' };
 const PHASE_VAR = { rebuild: '--rebuild', base: '--base', build: '--build', specific: '--specific', taper: '--taper', race: '--racep', transition: '--transition' };
-const RACE_TYPES = { sprint: 'Sprint triathlon', olympic: 'Olympic triathlon', half: '70.3 / half', full: 'Ironman / full', run10k: '10 km run', halfMarathon: 'Half marathon', marathon: 'Marathon', bikeEvent: 'Bike event / TT', other: 'Other' };
+const RACE_TYPES = { sprint: 'Sprint triathlon', olympic: 'Olympic triathlon', half: '70.3 / half', full: 'Ironman / full', duathlonSprint: 'Duathlon — sprint (5/20/2.5 km)', duathlon: 'Duathlon — standard (10/40/5 km)', aquathlon: 'Aquathlon (swim–run)', run10k: '10 km run', halfMarathon: 'Half marathon', marathon: 'Marathon', bikeEvent: 'Bike event / TT', other: 'Other' };
 
 let S = null;
 let view = location.hash.slice(1) || 'today';

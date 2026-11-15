@@ -8,6 +8,8 @@ const TRI: TriDistance[] = ['sprint', 'olympic', 'half', 'full'];
 export function triDistance(t: RaceType | undefined): TriDistance {
   if (t && (TRI as string[]).includes(t)) return t as TriDistance;
   if (t === 'marathon' || t === 'bikeEvent') return 'half';
+  // Sprint duathlon (5/20/2.5 km) and aquathlon are raced at sprint intensity; standard duathlon (10/40/5 km) like an Olympic.
+  if (t === 'duathlonSprint' || t === 'aquathlon') return 'sprint';
   return 'olympic';
 }
 
@@ -154,7 +156,7 @@ export function buildSeason(input: SeasonInput): { weeks: SeasonWeek[]; warnings
     weeks.push({
       start: wkStart, phase, loadIdx, recovery, testWeek,
       targetTss: 0, targetHours: 0, ctlEnd: 0, races: wkRaces,
-      targetRaceId: target?.id, targetType: triDistance(target?.type),
+      targetRaceId: target?.id, targetType: triDistance(target?.type), targetRace: target?.type,
       focus: recovery ? `Recovery week${testWeek ? ' + threshold testing' : ''}: absorb the block. ${FOCUS[phase]}` : FOCUS[phase],
     });
     if (loading && !recovery) { run++; loadIdx++; } else run = 0;

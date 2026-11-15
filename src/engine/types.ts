@@ -4,6 +4,7 @@ export type Sport = 'swim' | 'bike' | 'run' | 'strength' | 'race';
 export type Phase = 'rebuild' | 'base' | 'build' | 'specific' | 'taper' | 'race' | 'transition';
 export type RaceType =
   | 'sprint' | 'olympic' | 'half' | 'full'
+  | 'duathlonSprint' | 'duathlon' | 'aquathlon'
   | 'run10k' | 'halfMarathon' | 'marathon' | 'bikeEvent' | 'other';
 export type TriDistance = 'sprint' | 'olympic' | 'half' | 'full';
 export type Priority = 'A' | 'B' | 'C';
@@ -139,6 +140,8 @@ export interface SeasonWeek {
   /** The race this block is building towards */
   targetRaceId?: string;
   targetType: TriDistance;
+  /** Actual type of the race being built towards (duathlon / aquathlon shift the discipline mix) */
+  targetRace?: RaceType;
   focus: string;
 }
 

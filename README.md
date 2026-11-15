@@ -52,6 +52,10 @@ the Claude API.
   taper → race → transition), handles multiple A-races, gives B-races a short freshen-up and trains
   through C-races. Weekly load comes from a forward simulation of fitness (CTL) with a controlled
   ramp, recovery weeks (3:1 or 2:1) and scheduled threshold tests.
+- **Race types** — sprint, Olympic, 70.3 and Ironman triathlons, sprint and standard duathlons,
+  aquathlons, running races and bike events. With a duathlon or aquathlon as the target, the
+  specific block, taper and race week shift time from the discipline that is not raced (kept at
+  maintenance) to the ones that are.
 - **Return to training** — a 2–6 week rebuild block sized by how long you were off: frequency, then
   volume, then intensity; bike intensity returns before run intensity; ends with re-testing.
 - **Availability-aware weeks** — long sessions on your big days, hard days spaced apart, swims only

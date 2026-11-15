@@ -335,6 +335,7 @@ export const swim = {
 // ============================== RACE ==============================
 export const RACE_LOAD: Record<string, { tss: number; min: number }> = {
   sprint: { tss: 95, min: 70 }, olympic: { tss: 170, min: 140 }, half: { tss: 310, min: 300 }, full: { tss: 560, min: 660 },
+  duathlonSprint: { tss: 90, min: 65 }, duathlon: { tss: 170, min: 125 }, aquathlon: { tss: 55, min: 35 },
   run10k: { tss: 70, min: 42 }, halfMarathon: { tss: 140, min: 95 }, marathon: { tss: 280, min: 200 },
   bikeEvent: { tss: 220, min: 210 }, other: { tss: 120, min: 100 },
 };
