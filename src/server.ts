@@ -7,6 +7,7 @@ import { Store } from './store.ts';
 import { addDays, localToday } from './engine/dates.ts';
 import { applyReadiness, customWorkout, ensureHorizon, generate, reconcile, toIcs, uid, viewState } from './engine/plan.ts';
 import { assessReadiness } from './engine/readiness.ts';
+import { applyAdaptations, proposeAdaptations } from './engine/adapt.ts';
 import { Intervals, IntervalsError, racesFrom, thresholdsFrom } from './intervals.ts';
 import type { Session } from './engine/types.ts';
 import { chatView, COACH_MODEL, coachConfigured, CoachError, coachTurn } from './coach.ts';
@@ -103,11 +104,12 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       if (!s().races.some((x) => x.date === r.date)) { s().races.push({ id: uid('r'), ...r }); importedRaces++; }
     }
     const matched = reconcile(s());
+    const adapted = s().profile.autoAdapt ? applyAdaptations(s(), t) : [];
     s().intervals.lastSync = new Date().toISOString();
     s().intervals.lastError = undefined;
     return {
       thresholdsUpdated: updated, activities: s().activities.length, added: Math.max(0, s().activities.length - before),
-      matched, importedRaces, historyFrom: s().intervals.historyFrom, hidden: s().intervals.hidden ?? 0,
+      matched, adapted, importedRaces, historyFrom: s().intervals.historyFrom, hidden: s().intervals.hidden ?? 0,
     };
   }
 
@@ -163,6 +165,7 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
         },
         strengthEquipment: pickOf(b.strengthEquipment, ['gym', 'home'], p.strengthEquipment),
         autoThresholds: b.autoThresholds === undefined ? p.autoThresholds : !!b.autoThresholds,
+        autoAdapt: b.autoAdapt === undefined ? p.autoAdapt : !!b.autoAdapt,
       };
       return { ok: true };
     },
@@ -270,6 +273,13 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       const t = today();
       const changes = applyReadiness(s(), t, assessReadiness(t, s().wellness, s().checkins[t]));
       return { ok: true, changes };
+    },
+
+    'POST /api/adapt/apply': async () => ({ ok: true, changes: applyAdaptations(s(), today()) }),
+    'POST /api/adapt/dismiss': async (req) => {
+      const key = String((await body(req)).key ?? '');
+      if (proposeAdaptations(s(), today()).some((a) => a.key === key)) (s().dismissedAdapt ??= []).push(key);
+      return { ok: true };
     },
 
     'POST /api/intervals/connect': async (req) => {

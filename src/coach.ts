@@ -5,6 +5,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { addDays, diffDays, DAY_NAMES, dow, mondayOf } from './engine/dates.ts';
 import { assessReadiness } from './engine/readiness.ts';
 import { summarizeHistory } from './engine/history.ts';
+import { proposeAdaptations } from './engine/adapt.ts';
 import { currentCtl, customWorkout, generate, uid, type State } from './engine/plan.ts';
 import { finalize, toIcuText, zoneTable } from './engine/zones.ts';
 import type { Session } from './engine/types.ts';
@@ -134,6 +135,8 @@ export function coachContext(s: State, today: string): string {
   const sess = s.sessions.filter((x) => x.date >= from && x.date <= to);
   if (sess.length) { out.push(`Sessions ${from} to ${to}:`); for (const x of sess) out.push(`  ${line(x)}`); }
 
+  const adapt = proposeAdaptations(s, today);
+  if (adapt.length) out.push(`Adaptations the app is currently proposing (not applied): ${adapt.map((a) => `${a.title} — ${a.detail} ${a.actions.join(' ')}`).join(' | ')}`);
   const ctl = currentCtl(s);
   const lastW = s.wellness.at(-1);
   if (ctl != null) out.push(`Fitness: CTL ${ctl.toFixed(0)}${lastW?.atl != null ? `, ATL ${lastW.atl.toFixed(0)}, form ${(ctl - lastW.atl).toFixed(0)}` : ''}.`);

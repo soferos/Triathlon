@@ -13,6 +13,7 @@ export const defaultProfile = (): Profile => ({
   comeback: { active: true, weeksOff: 8 },
   strengthEquipment: 'gym',
   autoThresholds: true,
+  autoAdapt: false,
 });
 
 export const defaultAvailability = (): Availability => ({

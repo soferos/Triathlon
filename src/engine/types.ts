@@ -38,6 +38,8 @@ export interface Profile {
   comeback: { active: boolean; weeksOff: number; resumedOn?: string; note?: string };
   strengthEquipment: 'gym' | 'home';
   autoThresholds: boolean;
+  /** Apply load/missed-session adaptations automatically after each sync instead of proposing them */
+  autoAdapt: boolean;
 }
 
 export interface DayAvailability { minutes: number; pool: boolean; gym: boolean }

@@ -65,6 +65,11 @@ the Claude API.
   power/plyometrics → in-season maintenance, for gym or home equipment.
 - **Daily readiness** — 7-day HRV trend against your own baseline, resting HR, sleep, form and a
   subjective check-in. One click shifts or replaces today's session when you are not recovered.
+- **Adapts to what you actually did** — after each sync the app compares done against planned and
+  proposes changes to the rest of the week: protect the hard session after a day that went far
+  beyond plan, trim easy volume when the week is running over its load target, and reschedule a
+  missed key or long session only where a day has room and hard days stay apart. Apply with one
+  click, keep the plan as is, or switch on automatic application in Profile.
 - **Closed loop** — completed activities are matched to planned sessions; each re-plan starts from
   the fitness you actually have, so missed training is never "made up" by cramming.
 - **AI coach** — a Claude-backed chat that sees your profile, season, upcoming sessions, readiness
@@ -94,7 +99,8 @@ Re-pushing updates workouts in place and removes ones deleted here. Only events 
 ## Layout
 
 ```
-src/engine/   season.ts (periodisation, load)  week.ts (scheduler)  workouts.ts (library)
+src/engine/   adapt.ts (done-vs-planned adjustments)
+              season.ts (periodisation, load)  week.ts (scheduler)  workouts.ts (library)
               strength.ts  readiness.ts  zones.ts (targets, Intervals.icu text)  plan.ts (state)
 src/intervals.ts   Intervals.icu API client
 src/coach.ts       Claude coach: context, tools, conversation loop

@@ -10,6 +10,7 @@ import { finalize, toIcuText, viewWorkout, zoneTable } from './zones.ts';
 import { bike, run, swim } from './workouts.ts';
 import { strengthProgramme } from './strength.ts';
 import { summarizeHistory } from './history.ts';
+import { proposeAdaptations } from './adapt.ts';
 
 export const DETAIL_WEEKS = 4;
 
@@ -34,6 +35,8 @@ export interface State {
     hidden?: number;
   };
   coach: { apiKey?: string; messages: unknown[] };
+  /** Adaptation proposals the athlete dismissed (cleared when the week rolls over) */
+  dismissedAdapt?: string[];
 }
 
 export const emptyState = (): State => ({
@@ -84,6 +87,7 @@ export function generate(s: State, today: string, scope: 'future' | 'week' = 'fu
 export function ensureHorizon(s: State, today: string): boolean {
   if (!s.season) return false;
   if (s.season.weeks[0]?.start === mondayOf(today)) return false;
+  s.dismissedAdapt = [];
   generate(s, today, 'future');
   return true;
 }
@@ -289,6 +293,7 @@ export function viewState(s: State, today: string) {
     fitness, ctl: currentCtl(s) ?? null, monotony: monotony(daily),
     activities: s.activities.filter((a) => a.date >= addDays(today, -28)),
     extras: unplannedActivities(s, addDays(mondayOf(today), -14)),
+    adaptations: proposeAdaptations(s, today).map(({ ops, ...a }) => ({ ...a, actionable: ops.length > 0 })),
     zones: zoneTable(p), strength: strengthProgramme(p), needs,
     nextRace: nextRace ? { ...nextRace, days: diffDays(nextRace.date, today) } : null,
   };

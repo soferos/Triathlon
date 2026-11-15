@@ -66,7 +66,8 @@ async function autoSync() {
   try {
     const r = await api('POST', '/api/intervals/sync', {});
     await load();
-    if (r.matched) toast(`${r.matched} completed ${r.matched === 1 ? 'activity' : 'activities'} matched to your plan`);
+    if (r.adapted?.length) toast(`Plan adapted: ${r.adapted.join(' ')}`);
+    else if (r.matched) toast(`${r.matched} completed ${r.matched === 1 ? 'activity' : 'activities'} matched to your plan`);
   } catch { await load().catch(() => {}); }
   syncing = false;
 }
@@ -129,6 +130,18 @@ function sessCard(x) {
     h('div', { class: 't' }, x.workout.name),
     a ? [h('div', { class: 'm did' }, `Did: ${actualLine(a)}`), h('div', { class: 'm' }, `Planned ${meta(x.workout)}${verdict(x) ? ` · ${verdict(x)}` : ''}`)]
       : h('div', { class: 'm' }, `${SPORT[x.sport]} · ${meta(x.workout)}${x.origin === 'adapted' ? ' · adapted' : x.origin === 'custom' ? ' · custom' : ''}${missed ? ' · not done' : ''}`));
+}
+// Proposed changes to the rest of the week, based on what was actually done.
+function adaptCards() {
+  const list = S.adaptations || [];
+  if (!list.length) return null;
+  const any = list.some((a) => a.actionable);
+  return h('div', { class: 'card adapt' },
+    h('div', { class: 'row' }, h('h2', { style: 'margin:0' }, 'Suggested adjustments'), h('span', { class: 'muted small' }, 'from what you have actually done this week'),
+      any && h('button', { class: 'btn primary right', onclick: () => act(() => api('POST', '/api/adapt/apply', {}), (r) => r.changes.join(' ') || 'Noted') }, list.length > 1 ? 'Apply all' : 'Apply')),
+    list.map((a) => h('div', { class: 'signal' }, h('span', { class: `pill ${a.kind === 'missed' && !a.actionable ? '' : 'warn'}` }, { bigday: 'Big day', overload: 'Load', missed: 'Missed' }[a.kind]),
+      h('div', { style: 'flex:1' }, h('b', {}, a.title), h('div', { class: 'small' }, a.detail), a.actions.length ? h('ul', { class: 'clean small', style: 'margin-top:4px' }, a.actions.map((t) => h('li', {}, t))) : null),
+      h('button', { class: 'btn sm', onclick: () => act(() => api('POST', '/api/adapt/dismiss', { key: a.key }), 'Left as planned') }, a.actionable ? 'Keep as planned' : 'OK'))));
 }
 const actualLine = (a) => [hm(a.durationMin || 0), a.distanceKm && `${a.distanceKm} km`, `${a.tss ?? 0} TSS`, a.np && `NP ${Math.round(a.np)} W`, a.avgHr && `${Math.round(a.avgHr)} bpm`].filter(Boolean).join(' · ');
 // How the completed session compares with the plan, by duration.
@@ -200,6 +213,7 @@ function vToday() {
   }
   if (S.needs.length) out.push(h('div', { class: 'notice' }, `Missing thresholds: ${S.needs.join(', ')}. Targets show as % until set — `, h('a', { href: '#profile' }, 'add them'), ' or sync from Intervals.icu.'));
   if (S.intervals.lastError) out.push(h('div', { class: 'notice bad' }, `Intervals.icu: ${S.intervals.lastError}`));
+  out.push(adaptCards());
 
   const r = S.readiness;
   const cls = { go: 'good', adjust: 'warn', recover: 'bad', unknown: '' }[r.status];
@@ -253,6 +267,7 @@ function vPlan() {
     btn('Rebuild this week', () => confirm('Rebuild the rest of the current week from today? Pinned and completed sessions are kept.') && act(() => api('POST', '/api/plan/generate', { scope: 'week' }), 'Week rebuilt')),
     S.intervals.connected && h('span', { class: 'row' }, pushDays, btn('Push to Intervals.icu', () => act(() => api('POST', '/api/intervals/push', { days: +pushDays.value }), (r) => `Pushed ${r.pushed} workouts${r.removed ? `, removed ${r.removed} stale` : ''}`), 'primary')))];
   out.push(h('div', { class: 'row', style: 'margin-bottom:12px' }, weeks.map((w, i) => h('button', { class: `btn ${i === planWeek ? 'primary' : ''}`, onclick: () => { planWeek = i; render(); } }, i === 0 ? 'This week' : `${+w.start.slice(8)} ${MONTHS[+w.start.slice(5, 7) - 1]}`, ' ', h('span', { class: 'small' }, `· ${PHASE[w.phase]}${w.recovery ? ' (R)' : ''}`)))));
+  if (planWeek === 0) out.push(adaptCards());
   for (const w of S.weekWarnings[wk.start] || []) out.push(h('div', { class: 'notice' }, w));
   out.push(h('div', { class: 'week' }, DAYS.map((d, i) => {
     const date = addDays(wk.start, i);
@@ -462,7 +477,8 @@ function vProfile() {
       field('Recovery cycle', sel(p, 'recoveryCycle', { auto: 'Auto (by age)', '3:1': '3 weeks on, 1 easy', '2:1': '2 weeks on, 1 easy' })),
       field('Limiter (gets extra time)', sel(p, 'limiter', { none: 'Balanced', swim: 'Swim', bike: 'Bike', run: 'Run' })),
       field('Strength equipment', sel(p, 'strengthEquipment', { gym: 'Full gym (barbell)', home: 'Home (dumbbells, bands)' })),
-      h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: p.restDay, onchange: (e) => (p.restDay = e.target.checked) }), 'Protect one full rest day per week')),
+      h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: p.restDay, onchange: (e) => (p.restDay = e.target.checked) }), 'Protect one full rest day per week'),
+      h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: p.autoAdapt, onchange: (e) => (p.autoAdapt = e.target.checked) }), 'Apply suggested adjustments automatically after each sync')),
       S.ctl != null && h('p', { class: 'muted small', style: 'margin-top:10px' }, `Starting fitness is taken from Intervals.icu (CTL ${S.ctl.toFixed(0)}), not from the hours above.`)),
     card('Return to training', h('div', { class: 'form' },
       h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: p.comeback.active, onchange: (e) => (p.comeback.active = e.target.checked) }), 'I am coming back from a break'),
