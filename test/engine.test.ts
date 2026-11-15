@@ -184,3 +184,34 @@ test('plan: generation keeps locked sessions, reconciles activities and adapts t
   assert.equal(hard.locked, true);
   assert.equal(finalize(hard.workout, s.profile).tss, hard.workout.tss);
 });
+
+test('reconcile: matches a session done on another day, records what was done, and leaves true extras unplanned', async () => {
+  const { unplannedActivities } = await import('../src/engine/plan.ts');
+  const s = emptyState();
+  s.profile = profile();
+  generate(s, '2026-11-09');
+  const longRun = s.sessions.find((x) => x.role === 'long' && x.sport === 'run' && x.date <= '2026-11-15')!;
+  assert.equal(longRun.date, '2026-11-15');
+  const before = s.sessions.filter((x) => x.sport === 'run' && x.date <= '2026-11-15').length;
+  s.activities = [
+    // long run done a day early and much longer than prescribed
+    { id: 'r1', date: '2026-11-14', sport: 'run', name: 'Hilly 24k', durationMin: 118, tss: 131, distanceKm: 24.1, avgHr: 149, intensity: 0.82 },
+    // a walk-length yoga-ish thing with no counterpart, and a short run far from any open session
+    { id: 'o1', date: '2026-11-12', sport: 'other', name: 'Hike', durationMin: 90, tss: 30 },
+    { id: 'r2', date: '2026-11-09', sport: 'run', name: 'Shake-out', durationMin: 12, tss: 8 },
+  ];
+  assert.equal(reconcile(s), 1);
+  const done = s.sessions.find((x) => x.actual?.activityId === 'r1')!;
+  assert.equal(done.id, longRun.id, 'paired with the long run, not a short run');
+  assert.equal(done.status, 'done');
+  assert.equal(done.date, '2026-11-14');
+  assert.equal(done.actual!.plannedDate, '2026-11-15');
+  assert.equal(done.actual!.durationMin, 118);
+  assert.equal(done.actual!.distanceKm, 24.1);
+  assert.equal(s.sessions.filter((x) => x.sport === 'run' && x.date <= '2026-11-15').length, before, 'no session duplicated or lost');
+  assert.deepEqual(unplannedActivities(s, '2026-11-09').map((a) => a.id).sort(), ['o1', 'r2']);
+  // an edited activity refreshes the recorded numbers on the next sync without re-matching
+  s.activities[0].tss = 140;
+  assert.equal(reconcile(s), 0);
+  assert.equal(done.actual!.tss, 140);
+});

@@ -88,23 +88,62 @@ export function ensureHorizon(s: State, today: string): boolean {
   return true;
 }
 
-/** Mark planned sessions done when a matching activity (same day, same sport) exists. */
+/**
+ * Link completed activities to planned sessions and record what was actually done.
+ * An activity pairs with the best-fitting open session of the same sport: one on the same day, or
+ * one within two days in the same week and of broadly similar length. In the second case the
+ * session was done on a different day than planned, so it moves to the day it happened.
+ * Activities that match nothing stay unplanned extras (see unplannedActivities).
+ */
 export function reconcile(s: State): number {
   let n = 0;
-  const used = new Set(s.sessions.map((x) => x.actual?.activityId).filter(Boolean));
+  const byId = new Map(s.activities.map((a) => [a.id, a]));
+  const used = new Set<string>();
+  const record = (x: Session, a: Activity) => {
+    x.actual = {
+      tss: a.tss, durationMin: a.durationMin, activityId: a.id, name: a.name,
+      distanceKm: a.distanceKm, np: a.np, avgHr: a.avgHr, intensity: a.intensity, plannedDate: x.actual?.plannedDate,
+    };
+  };
+  // Refresh sessions matched on an earlier sync (the activity may have been edited or re-analysed since).
+  for (const x of s.sessions) {
+    const id = x.actual?.activityId;
+    if (!id) continue;
+    used.add(id);
+    const a = byId.get(id);
+    if (a) record(x, a);
+  }
+  const open = (x: Session, a: Activity) => x.sport === a.sport && !x.actual && x.status !== 'skipped';
+  const link = (x: Session, a: Activity) => {
+    if (x.date !== a.date) { const planned = x.date; x.date = a.date; record(x, a); x.actual!.plannedDate = planned; } else record(x, a);
+    x.status = 'done'; x.locked = true;
+    used.add(a.id); n++;
+  };
+  // One pass, oldest first. A same-day session always qualifies; a session on another day must be
+  // within two days in the same week and of broadly similar length. Day distance is weighted so a
+  // same-day match wins unless another session is a much better fit (a 2 h run is the long run
+  // planned for tomorrow, not today's 30 min jog).
   for (const a of s.activities) {
     if (used.has(a.id) || a.sport === 'other') continue;
-    const cands = s.sessions.filter((x) => x.date === a.date && x.sport === a.sport && !x.actual && x.status !== 'skipped');
+    const cands = s.sessions.filter((x) => {
+      if (!open(x, a)) return false;
+      if (x.date === a.date) return true;
+      if (x.status !== 'planned' || mondayOf(x.date) !== mondayOf(a.date) || Math.abs(diffDays(x.date, a.date)) > 2) return false;
+      const ratio = a.durationMin / Math.max(1, x.workout.durationMin);
+      return ratio >= 0.5 && ratio <= 2;
+    });
     if (!cands.length) continue;
-    // Closest planned duration wins when there are two sessions of a sport on one day.
-    const best = cands.sort((x, y) => Math.abs(x.workout.durationMin - a.durationMin) - Math.abs(y.workout.durationMin - a.durationMin))[0];
-    best.status = 'done';
-    best.locked = true;
-    best.actual = { tss: a.tss, durationMin: a.durationMin, activityId: a.id, name: a.name };
-    used.add(a.id);
-    n++;
+    const cost = (x: Session) => Math.abs(diffDays(x.date, a.date)) * 30 + Math.abs(x.workout.durationMin - a.durationMin);
+    link(cands.sort((x, y) => cost(x) - cost(y))[0], a);
   }
+  if (n) s.sessions.sort((a, b) => a.date.localeCompare(b.date));
   return n;
+}
+
+/** Completed activities since `from` that are not linked to any planned session. */
+export function unplannedActivities(s: State, from: string): Activity[] {
+  const linked = new Set(s.sessions.map((x) => x.actual?.activityId).filter(Boolean));
+  return s.activities.filter((a) => a.date >= from && !linked.has(a.id));
 }
 
 function easier(x: Session, p: Profile, level: 'adjust' | 'recover'): Workout | null {
@@ -249,6 +288,7 @@ export function viewState(s: State, today: string) {
     history: summarizeHistory(s.activities, s.wellness, today),
     fitness, ctl: currentCtl(s) ?? null, monotony: monotony(daily),
     activities: s.activities.filter((a) => a.date >= addDays(today, -28)),
+    extras: unplannedActivities(s, addDays(mondayOf(today), -14)),
     zones: zoneTable(p), strength: strengthProgramme(p), needs,
     nextRace: nextRace ? { ...nextRace, days: diffDays(nextRace.date, today) } : null,
   };

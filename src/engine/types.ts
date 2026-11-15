@@ -113,7 +113,13 @@ export interface Session {
   /** Locked sessions survive plan regeneration (user-edited, custom, or completed) */
   locked: boolean;
   origin: 'plan' | 'custom' | 'adapted';
-  actual?: { tss?: number; durationMin?: number; activityId?: string; name?: string };
+  /** What was actually done, from the matched Intervals.icu activity */
+  actual?: {
+    tss?: number; durationMin?: number; activityId?: string; name?: string;
+    distanceKm?: number; np?: number; avgHr?: number; intensity?: number;
+    /** Set when the session was done on a different day than planned */
+    plannedDate?: string;
+  };
   adaptedNote?: string;
 }
 

@@ -57,6 +57,20 @@ function toast(msg, bad) {
   clearTimeout(toast.t); toast.t = setTimeout(() => (t.style.display = 'none'), bad ? 6000 : 3200);
 }
 async function load() { S = await api('GET', '/api/state'); render(); }
+// Pull new activities from Intervals.icu without being asked: on open and when the tab regains focus, at most every 10 minutes.
+let syncing = false;
+async function autoSync() {
+  if (!S?.intervals.connected || syncing || document.hidden) return;
+  if (S.intervals.lastSync && Date.now() - new Date(S.intervals.lastSync).getTime() < 10 * 60 * 1000) return;
+  syncing = true;
+  try {
+    const r = await api('POST', '/api/intervals/sync', {});
+    await load();
+    if (r.matched) toast(`${r.matched} completed ${r.matched === 1 ? 'activity' : 'activities'} matched to your plan`);
+  } catch { await load().catch(() => {}); }
+  syncing = false;
+}
+document.addEventListener('visibilitychange', autoSync);
 async function act(fn, ok) {
   try { const r = await fn(); await load(); if (ok) toast(typeof ok === 'function' ? ok(r) : ok); return r; }
   catch (e) { toast(e.message, true); }
@@ -110,9 +124,28 @@ function workoutDetail(w) {
 const meta = (w) => `${hm(w.durationMin)} · ${w.tss} TSS`;
 function sessCard(x) {
   const missed = x.status === 'planned' && x.date < S.today;
+  const a = x.actual;
   return h('div', { class: `sess ${x.sport} ${x.status} ${missed ? 'missed' : ''}`, onclick: () => sessionDialog(x) },
     h('div', { class: 't' }, x.workout.name),
-    h('div', { class: 'm' }, `${SPORT[x.sport]} · ${meta(x.workout)}${x.origin === 'adapted' ? ' · adapted' : x.origin === 'custom' ? ' · custom' : ''}`));
+    a ? [h('div', { class: 'm did' }, `Did: ${actualLine(a)}`), h('div', { class: 'm' }, `Planned ${meta(x.workout)}${verdict(x) ? ` · ${verdict(x)}` : ''}`)]
+      : h('div', { class: 'm' }, `${SPORT[x.sport]} · ${meta(x.workout)}${x.origin === 'adapted' ? ' · adapted' : x.origin === 'custom' ? ' · custom' : ''}${missed ? ' · not done' : ''}`));
+}
+const actualLine = (a) => [hm(a.durationMin || 0), a.distanceKm && `${a.distanceKm} km`, `${a.tss ?? 0} TSS`, a.np && `NP ${Math.round(a.np)} W`, a.avgHr && `${Math.round(a.avgHr)} bpm`].filter(Boolean).join(' · ');
+// How the completed session compares with the plan, by duration.
+function verdict(x) {
+  const r = (x.actual?.durationMin || 0) / Math.max(1, x.workout.durationMin);
+  const moved = x.actual?.plannedDate ? `moved from ${fmtDate(x.actual.plannedDate)}` : '';
+  const size = r > 1.2 ? `${Math.round((r - 1) * 100)}% longer` : r < 0.8 ? `${Math.round((1 - r) * 100)}% shorter` : '';
+  return [size, moved].filter(Boolean).join(', ');
+}
+const extraCard = (a) => h('div', { class: `sess extra ${a.sport}`, onclick: () => extraDialog(a) },
+  h('div', { class: 't' }, a.name), h('div', { class: 'm did' }, `Did: ${actualLine(a)}`), h('div', { class: 'm' }, `${a.type || SPORT[a.sport] || 'Activity'} · not in plan`));
+function extraDialog(a) {
+  openDialog(a.sport, a.name, [
+    h('div', { class: 'row', style: 'margin-bottom:10px' }, h('span', { class: 'pill' }, fmtDate(a.date, true)), h('span', { class: 'pill good' }, 'Completed'), h('span', { class: 'pill' }, a.type || a.sport)),
+    h('p', {}, actualLine(a), a.intensity ? ` · IF ${a.intensity}` : ''),
+    h('p', { class: 'muted small' }, 'This activity was recorded in Intervals.icu but no planned session of this sport was close enough to match it (same week, within two days, broadly similar length). Its load still counts in your week and your fitness.'),
+  ]);
 }
 function openDialog(cls, title, body) {
   const d = $('#dlg');
@@ -129,7 +162,14 @@ function sessionDialog(x) {
       x.workout.hard && h('span', { class: 'pill warn' }, 'Key intensity'), x.locked && h('span', { class: 'pill' }, 'Pinned'),
       x.status !== 'planned' && h('span', { class: `pill ${x.status === 'done' ? 'good' : ''}` }, x.status)),
     x.adaptedNote && h('div', { class: 'notice info' }, x.adaptedNote),
-    x.actual && h('div', { class: 'notice good' }, `Completed: ${x.actual.name || 'activity'} — ${hm(x.actual.durationMin || 0)}, ${x.actual.tss ?? 0} TSS (planned ${meta(x.workout)})`),
+    x.actual && h('div', { class: 'notice good' },
+      h('div', {}, h('b', {}, `Completed: ${x.actual.name || 'activity'}`), x.actual.plannedDate ? ` — done on ${fmtDate(x.date)}, planned for ${fmtDate(x.actual.plannedDate)}` : ''),
+      h('table', { style: 'margin-top:6px' }, h('thead', {}, h('tr', {}, ['', 'Time', 'Load', 'Distance', 'NP', 'Avg HR', 'IF'].map((c) => h('th', {}, c)))), h('tbody', {},
+        h('tr', {}, h('td', {}, h('b', {}, 'Did')), h('td', { class: 'num' }, hm(x.actual.durationMin || 0)), h('td', { class: 'num' }, `${x.actual.tss ?? 0} TSS`), h('td', { class: 'num' }, x.actual.distanceKm ? `${x.actual.distanceKm} km` : '–'),
+          h('td', { class: 'num' }, x.actual.np ? `${Math.round(x.actual.np)} W` : '–'), h('td', { class: 'num' }, x.actual.avgHr ? Math.round(x.actual.avgHr) : '–'), h('td', { class: 'num' }, x.actual.intensity ?? '–')),
+        h('tr', {}, h('td', {}, 'Planned'), h('td', { class: 'num' }, hm(x.workout.durationMin)), h('td', { class: 'num' }, `${x.workout.tss} TSS`), h('td', {}, ''), h('td', {}, ''), h('td', {}, ''), h('td', {}, '')))),
+      verdict(x) && h('div', { class: 'small', style: 'margin-top:6px' }, `Versus plan: ${verdict(x)}.`)),
+    x.actual && h('h3', {}, 'What was planned'),
     workoutDetail(x.workout),
     x.sport !== 'race' && x.sport !== 'strength' && h('details', {}, h('summary', { class: 'muted small' }, 'Intervals.icu workout text'), h('pre', { class: 'icu' }, x.workout.icu)),
     h('div', { class: 'row', style: 'margin-top:14px' },
@@ -183,8 +223,10 @@ function vToday() {
       h('div', { class: 'row' }, h('h3', { style: 'margin:0' }, x.workout.name), h('span', { class: 'pill' }, meta(x.workout)), x.status !== 'planned' && h('span', { class: `pill ${x.status === 'done' ? 'good' : ''}` }, x.status),
         h('button', { class: 'btn sm right', onclick: () => sessionDialog(x) }, 'Options')),
       x.adaptedNote && h('div', { class: 'muted small' }, x.adaptedNote),
+      x.actual && h('div', { class: 'notice good', style: 'margin-top:6px' }, h('b', {}, 'Did: '), `${x.actual.name || 'activity'} — ${actualLine(x.actual)}${verdict(x) ? ` (${verdict(x)})` : ''}`),
       workoutDetail(x.workout)))
-      : h('p', { class: 'muted' }, S.season ? 'Rest day. Sleep, eat, and leave it alone — this is where the adaptation happens.' : 'Nothing planned.'));
+      : !S.extras.some((a) => a.date === t) && h('p', { class: 'muted' }, S.season ? 'Rest day. Sleep, eat, and leave it alone — this is where the adaptation happens.' : 'Nothing planned.'),
+    S.extras.filter((a) => a.date === t).map(extraCard));
 
   const ws = S.weekStats[0];
   const side = [readiness];
@@ -219,7 +261,8 @@ function vPlan() {
     const cap = ov ? ov.minutes : S.availability.days[i].minutes;
     return h('div', { class: `day ${date === S.today ? 'today' : ''} ${date < S.today ? 'past' : ''}` },
       h('div', { class: 'dh' }, h('b', {}, `${d} ${+date.slice(8)}`), h('span', {}, ov ? `${ov.note || 'override'} · ${hm(cap)}` : hm(cap))),
-      list.length ? list.map(sessCard) : h('div', { class: 'muted small' }, cap < 30 ? 'Unavailable' : 'Rest'));
+      list.map(sessCard), S.extras.filter((a) => a.date === date).map(extraCard),
+      !list.length && !S.extras.some((a) => a.date === date) && h('div', { class: 'muted small' }, cap < 30 ? 'Unavailable' : 'Rest'));
   })));
   const sports = Object.entries(ws.bySport).sort((a, b) => b[1] - a[1]);
   out.push(h('div', { class: 'grid g3', style: 'margin-top:14px' },
@@ -593,4 +636,4 @@ function vMethod() {
   return [page('Method', 'The training philosophy and the science behind it.'), $('#method').content.cloneNode(true)];
 }
 
-load().catch((e) => { $('#main').replaceChildren(h('div', { class: 'notice bad' }, `Could not load: ${e.message}`)); });
+load().then(autoSync).catch((e) => { $('#main').replaceChildren(h('div', { class: 'notice bad' }, `Could not load: ${e.message}`)); });
