@@ -18,6 +18,7 @@ export class Store {
         profile: { ...base.profile, ...saved.profile, comeback: { ...base.profile.comeback, ...saved.profile?.comeback } },
         availability: { ...base.availability, ...saved.availability },
         intervals: { ...saved.intervals },
+        coach: { ...base.coach, ...saved.coach },
       };
     } else this.state = base;
   }

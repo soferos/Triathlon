@@ -11,17 +11,20 @@ after time off.
 
 ## Run it
 
-Requires Node.js ≥ 22.18. There are no dependencies to install.
+Requires Node.js ≥ 22.18.
 
 ```bash
+npm install          # one dependency: the Anthropic SDK, for the AI coach
 npm start            # http://127.0.0.1:3000
-npm test             # engine + API tests (uses a fake Intervals.icu)
+npm test             # engine + API tests (fake Intervals.icu and Claude servers)
+npm run typecheck
 ```
 
 Then, in the app:
 
 1. **Connect** → paste your Intervals.icu API key (Intervals.icu → Settings → Developer Settings).
-   Thresholds, fitness (CTL/ATL), HRV, resting HR, sleep, activities and calendar races are pulled in.
+   Thresholds, your full activity history, fitness (CTL/ATL), HRV, resting HR, sleep and calendar
+   races are pulled in. Optionally add an Anthropic API key on the same page to switch on the coach.
 2. **Profile & zones** → check thresholds, max weekly hours, and how long you were off.
 3. **Availability** → minutes per weekday, pool and gym access, date-specific exceptions.
 4. **Races & goals** → A/B/C races and season / long-term goals.
@@ -35,9 +38,13 @@ Then, in the app:
 | `HOST` | `127.0.0.1` | Bind address. Anything non-local requires `APP_PASSWORD` |
 | `APP_PASSWORD` | – | Enables HTTP Basic auth (any username) — set it if you host this for phone access, and put it behind HTTPS |
 | `DATA_DIR` | `./data` | Where `state.json` lives |
+| `ANTHROPIC_API_KEY` | – | Alternative to entering the coach's API key in the app |
+| `COACH_MODEL` | `claude-opus-5-5` | Claude model used by the coach |
 
-All data, including the Intervals.icu API key, stays in `data/state.json` on the machine running the
-app (git-ignored, owner-readable only). The key is never sent to the browser.
+All data, including the Intervals.icu and Anthropic API keys, stays in `data/state.json` on the
+machine running the app (git-ignored, owner-readable only). Keys are never sent to the browser.
+When you use the coach, each message sends your plan, thresholds, recent training and readiness to
+the Claude API.
 
 ## What it does
 
@@ -60,6 +67,13 @@ app (git-ignored, owner-readable only). The key is never sent to the browser.
   subjective check-in. One click shifts or replaces today's session when you are not recovered.
 - **Closed loop** — completed activities are matched to planned sessions; each re-plan starts from
   the fitness you actually have, so missed training is never "made up" by cramming.
+- **AI coach** — a Claude-backed chat that sees your profile, season, upcoming sessions, readiness
+  and training history. Ask why a session is there or how to execute it, or tell it what to change:
+  it can move, replace, add, skip and delete sessions, set availability for specific dates and
+  re-plan. Changes are pinned and listed back to you; nothing reaches your devices until you push.
+- **Training history** — the first sync imports every activity back to your first one (later syncs
+  refresh the last 60 days): weekly volume by sport, all-time fitness curve, yearly totals, longest
+  sessions, and a filterable activity list.
 - **Goals** — performance, health, skill and life goals for the season and the long term.
 - **Export** — structured workouts to Intervals.icu; `.ics` calendar feed for anything else.
 
@@ -83,6 +97,7 @@ Re-pushing updates workouts in place and removes ones deleted here. Only events 
 src/engine/   season.ts (periodisation, load)  week.ts (scheduler)  workouts.ts (library)
               strength.ts  readiness.ts  zones.ts (targets, Intervals.icu text)  plan.ts (state)
 src/intervals.ts   Intervals.icu API client
+src/coach.ts       Claude coach: context, tools, conversation loop
 src/server.ts      HTTP API + static UI
 public/            single-page UI (no build step)
 test/              node:test suites
@@ -91,6 +106,11 @@ test/              node:test suites
 The training rationale and references are on the app's **Method** page.
 
 ## Limits worth knowing
+
+- Activities that reached Intervals.icu **via Strava** are withheld by its API (Strava's terms), so
+  they cannot be imported; the app counts them and tells you. Connect Garmin / Wahoo / Zwift /
+  Apple Health directly to Intervals.icu, or bulk-upload your Strava export there, then re-import.
+- The coach is tested against a local fake of the Claude API, not the live service.
 
 - The Intervals.icu integration is tested against a local fake of the API, not yet against the live
   service. If a push is rejected, the error from Intervals.icu is shown in the app.

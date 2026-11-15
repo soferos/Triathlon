@@ -28,10 +28,23 @@ before(async () => {
         { types: ['Swim'], threshold_pace: 1.0989 },
       ] });
     }
+    const oldest = url.searchParams.get('oldest') ?? '', newest = url.searchParams.get('newest') ?? '';
+    const inRange = (d: string) => d.slice(0, 10) >= oldest && d.slice(0, 10) <= newest;
     if (req.method === 'GET' && path === '/wellness') {
-      return json(200, Array.from({ length: 30 }, (_, i) => ({ id: `2026-10-${String(i + 1).padStart(2, '0')}`, ctl: 40 + i * 0.1, atl: 42, hrv: 70, restingHR: 46 })));
+      return json(200, [
+        ...Array.from({ length: 30 }, (_, i) => ({ id: `2026-10-${String(i + 1).padStart(2, '0')}`, ctl: 40 + i * 0.1, atl: 42, hrv: 70, restingHR: 46 })),
+        { id: '2025-07-01', ctl: 88, atl: 90 },
+      ].filter((w) => inRange(w.id)));
     }
-    if (req.method === 'GET' && path === '/activities') return json(200, [{ id: 'a1', start_date_local: '2026-11-10T07:00:00', type: 'Ride', name: 'Ride', moving_time: 3600, icu_training_load: 55, distance: 30000 }]);
+    if (req.method === 'GET' && path === '/activities') {
+      return json(200, [
+        { id: 'a1', start_date_local: '2026-11-10T07:00:00', type: 'Ride', name: 'Ride', moving_time: 3600, icu_training_load: 55, distance: 30000, icu_weighted_avg_watts: 231, average_heartrate: 138, icu_intensity: 81.2 },
+        { id: 'a2', start_date_local: '2025-07-01T07:00:00', type: 'Run', name: 'Long run', moving_time: 5400, icu_training_load: 95, distance: 21000 },
+        { id: 'a3', start_date_local: '2025-06-01T07:00:00', type: 'VirtualRide', name: 'Zwift', moving_time: 3600, icu_training_load: 70, distance: 35000 },
+        { id: 'a4', start_date_local: '2024-03-02T07:00:00', type: 'GravelRide', name: 'Gravel', moving_time: 14400, icu_training_load: 200, distance: 120000 },
+        { id: 'st1', start_date_local: '2024-05-02T07:00:00', source: 'STRAVA', _note: 'STRAVA activities are not available via the API' },
+      ].filter((a) => inRange(a.start_date_local)));
+    }
     if (req.method === 'GET' && path === '/events') {
       return json(200, [...icu.events, { id: 999, category: 'RACE_A', name: 'Imported 70.3', start_date_local: '2027-07-04T00:00:00', type: 'Triathlon' }]
         .filter((e) => e.start_date_local.slice(0, 10) >= url.searchParams.get('oldest')! && e.start_date_local.slice(0, 10) <= url.searchParams.get('newest')!));
@@ -92,6 +105,7 @@ test('connect: syncs thresholds, fitness, activities and races; key never reache
   assert.equal(data.profile.runPaceSecPerKm, 235);
   assert.equal(data.profile.cssSecPer100, 91);
   assert.ok(Math.abs(data.ctl - 42.9) < 0.01);
+  assert.equal(data.history.count, 4);
   assert.ok(!JSON.stringify(data).includes('secret-key'));
   assert.ok(readFileSync(join(dir, 'state.json'), 'utf8').includes('secret-key'));
 });
@@ -142,4 +156,29 @@ test('session edits, check-in driven adaptation and calendar export', async () =
   assert.match(ics, /BEGIN:VEVENT/);
   assert.equal((await api('PUT', '/api/availability', { days: [] })).status, 400);
   assert.equal((await api('DELETE', '/api/intervals')).status, 200);
+});
+
+test('full history import walks back year by year, merges on re-sync and reports Strava-hidden activities', async () => {
+  icu.calls.length = 0;
+  const r = await api('POST', '/api/intervals/connect', { apiKey: 'secret-key' });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const actCalls = icu.calls.filter((c) => c.includes('/activities?'));
+  assert.ok(actCalls.length >= 4, `expected yearly chunks, got ${actCalls.length}`);
+  assert.equal(r.data.activities, 4);          // 1 recent + 3 older years' worth from the fake
+  assert.equal(r.data.hidden, 1);
+  assert.equal(r.data.historyFrom, '2024-03-02');
+  const { data } = await api('GET', '/api/state');
+  assert.equal(data.history.count, 4);
+  assert.equal(data.history.peakCtl.value, 88);
+  assert.ok(data.history.years.some((y: any) => y.year === '2024' && y.km.bike === 120));
+  assert.equal(data.intervals.hidden, 1);
+  const page = await api('GET', '/api/history?limit=2&sport=bike');
+  assert.equal(page.data.total, 3);
+  assert.equal(page.data.items[0].date, '2026-11-10');
+  assert.equal(page.data.items[0].np, 231);
+  // incremental sync keeps the old history and only refreshes the recent window
+  icu.calls.length = 0;
+  const again = await api('POST', '/api/intervals/sync', {});
+  assert.equal(again.data.activities, 4);
+  assert.equal(icu.calls.filter((c) => c.includes('/activities?')).length, 1);
 });

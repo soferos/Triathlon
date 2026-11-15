@@ -9,6 +9,7 @@ import { applyReadiness, customWorkout, ensureHorizon, generate, reconcile, toIc
 import { assessReadiness } from './engine/readiness.ts';
 import { Intervals, IntervalsError, racesFrom, thresholdsFrom } from './intervals.ts';
 import type { Session } from './engine/types.ts';
+import { chatView, COACH_MODEL, coachConfigured, CoachError, coachTurn } from './coach.ts';
 
 const ROOT = join(import.meta.dirname, '..');
 const PUBLIC = join(ROOT, 'public');
@@ -46,7 +47,12 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
     return new Intervals(s().intervals.apiKey!, s().intervals.athleteId);
   };
 
-  async function sync() {
+  /**
+   * Pull everything from Intervals.icu. The first sync (or `full`) walks back year by year until
+   * two consecutive years are empty, so the whole training history is imported; later syncs only
+   * refresh the last 60 days and merge.
+   */
+  async function sync(full = false) {
     const api = client();
     const t = today();
     const athlete = await api.athleteInfo();
@@ -60,8 +66,38 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       }
     }
     if (!s().profile.name && s().intervals.athleteName) s().profile.name = s().intervals.athleteName!;
-    s().wellness = await api.wellness(addDays(t, -120), t);
-    s().activities = await api.activities(addDays(t, -60), t);
+
+    const acts = new Map(full ? [] : s().activities.map((a) => [a.id, a]));
+    const well = new Map(full ? [] : s().wellness.map((w) => [w.date, w]));
+    const before = acts.size;
+    let hidden = 0;
+    const pull = async (oldest: string, newest: string) => {
+      const a = await api.activities(oldest, newest);
+      for (const x of a.list) acts.set(x.id, x);
+      const w = await api.wellness(oldest, newest);
+      for (const x of w) well.set(x.date, x);
+      hidden += a.hidden;
+      return a.list.length + a.hidden + w.filter((x) => x.ctl != null && x.ctl > 0.5).length;
+    };
+    if (full || !s().intervals.historyFrom) {
+      let empty = 0, oldest = t;
+      for (let y = 0; y < 20 && empty < 2; y++) {
+        const newest = addDays(t, -365 * y);
+        const from = addDays(newest, -364);
+        if ((await pull(from, newest)) > 0) { empty = 0; oldest = from; } else empty++;
+      }
+      const first = [...acts.values()].reduce((m, a) => (a.date < m ? a.date : m), t);
+      s().intervals.historyFrom = first < t ? first : oldest;
+      s().intervals.hidden = hidden;
+    } else {
+      // Only wipe-and-replace the recent window, so activities deleted in Intervals.icu disappear here too.
+      const from = addDays(t, -60);
+      for (const [id, a] of acts) if (a.date >= from) acts.delete(id);
+      await pull(from, t);
+    }
+    s().activities = [...acts.values()].sort((a, b) => a.date.localeCompare(b.date));
+    s().wellness = [...well.values()].sort((a, b) => a.date.localeCompare(b.date));
+
     let importedRaces = 0;
     for (const r of racesFrom(await api.events(t, addDays(t, 540)))) {
       if (!s().races.some((x) => x.date === r.date)) { s().races.push({ id: uid('r'), ...r }); importedRaces++; }
@@ -69,13 +105,32 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
     const matched = reconcile(s());
     s().intervals.lastSync = new Date().toISOString();
     s().intervals.lastError = undefined;
-    return { thresholdsUpdated: updated, activities: s().activities.length, matched, importedRaces };
+    return {
+      thresholdsUpdated: updated, activities: s().activities.length, added: Math.max(0, s().activities.length - before),
+      matched, importedRaces, historyFrom: s().intervals.historyFrom, hidden: s().intervals.hidden ?? 0,
+    };
   }
 
+  let busy = false;
   const routes: Record<string, (req: IncomingMessage, id?: string) => Promise<unknown>> = {
     'GET /api/state': async () => {
       if (ensureHorizon(s(), today())) store.save();
-      return viewState(s(), today());
+      return { ...viewState(s(), today()), coach: { configured: coachConfigured(s()), model: COACH_MODEL, messages: chatView(s()) } };
+    },
+
+    'POST /api/coach': async (req) => {
+      const b = await body(req);
+      const message = String(b.message ?? '').trim().slice(0, 8000);
+      if (!message) throw new HttpError(400, 'Message is empty');
+      if (busy) throw new HttpError(409, 'The coach is still answering your previous message.');
+      busy = true;
+      try { return { ok: true, ...(await coachTurn(s(), today(), message)) }; } finally { busy = false; }
+    },
+    'DELETE /api/coach': async () => { s().coach.messages = []; return { ok: true }; },
+    'PUT /api/coach/key': async (req) => {
+      const key = String((await body(req)).apiKey ?? '').trim();
+      s().coach.apiKey = key || undefined;
+      return { ok: true };
     },
 
     'PUT /api/profile': async (req) => {
@@ -223,9 +278,17 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       if (!apiKey) throw new HttpError(400, 'API key is required');
       const prev = { ...s().intervals };
       s().intervals = { apiKey, athleteId: b.athleteId ? String(b.athleteId).trim() : undefined };
-      try { return { ok: true, ...(await sync()) }; } catch (e) { s().intervals = prev; throw e; }
+      try { return { ok: true, ...(await sync(true)) }; } catch (e) { s().intervals = prev; throw e; }
     },
-    'POST /api/intervals/sync': async () => ({ ok: true, ...(await sync()) }),
+    'POST /api/intervals/sync': async (req) => ({ ok: true, ...(await sync(!!(await body(req)).full)) }),
+    'GET /api/history': async (req) => {
+      const q = new URL(req.url ?? '/', 'http://x').searchParams;
+      const sport = q.get('sport');
+      const all = s().activities.filter((a) => !sport || a.sport === sport);
+      const offset = Math.max(0, Number(q.get('offset')) || 0);
+      const limit = Math.max(1, Math.min(200, Number(q.get('limit')) || 50));
+      return { total: all.length, items: all.slice().reverse().slice(offset, offset + limit) };
+    },
     'POST /api/intervals/push': async (req) => {
       const b = await body(req);
       const days = Math.max(1, Math.min(28, Number(b.days) || 14));
@@ -259,6 +322,7 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       if (url.pathname.startsWith('/api/')) {
         // Same-origin only: state-changing requests must be JSON from our own pages.
         if (req.method !== 'GET' && req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) throw new HttpError(403, 'Cross-origin request refused');
+        if (req.method === 'GET' && url.pathname === '/api/history') return send(200, await routes['GET /api/history'](req));
         if (req.method === 'GET' && url.pathname === '/api/plan.ics') return send(200, toIcs(s(), today()), 'text/calendar; charset=utf-8');
         const parts = url.pathname.split('/');
         let key = `${req.method} ${url.pathname}`;
@@ -281,6 +345,7 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
         s().intervals.lastError = e.message;
         return send(502, { error: e.message });
       }
+      if (e instanceof CoachError) { store.save(); return send(e.status, { error: e.message }); }
       if (e instanceof HttpError) return send(e.status, { error: e.message });
       if (e instanceof Error && e.message.startsWith('A workout needs')) return send(400, { error: e.message });
       console.error(e);

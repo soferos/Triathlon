@@ -9,6 +9,7 @@ import { assessReadiness, monotony, type Readiness } from './readiness.ts';
 import { finalize, toIcuText, viewWorkout, zoneTable } from './zones.ts';
 import { bike, run, swim } from './workouts.ts';
 import { strengthProgramme } from './strength.ts';
+import { summarizeHistory } from './history.ts';
 
 export const DETAIL_WEEKS = 4;
 
@@ -27,12 +28,17 @@ export interface State {
   intervals: {
     apiKey?: string; athleteId?: string; athleteName?: string;
     lastSync?: string; lastPush?: string; lastError?: string;
+    /** Oldest date covered by a full history import */
+    historyFrom?: string;
+    /** Activities that exist in Intervals.icu but are withheld from its API (Strava-sourced) */
+    hidden?: number;
   };
+  coach: { apiKey?: string; messages: unknown[] };
 }
 
 export const emptyState = (): State => ({
   profile: defaultProfile(), availability: defaultAvailability(), races: [], goals: [], library: [],
-  season: null, sessions: [], weekWarnings: {}, checkins: {}, wellness: [], activities: [], intervals: {},
+  season: null, sessions: [], weekWarnings: {}, checkins: {}, wellness: [], activities: [], intervals: {}, coach: { messages: [] },
 });
 
 export const uid = (prefix: string) => `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
@@ -220,7 +226,7 @@ export function viewState(s: State, today: string) {
     const d = addDays(today, -i);
     daily.push(s.activities.filter((a) => a.date === d).reduce((t, a) => t + a.tss, 0));
   }
-  const fitness = [...s.wellness].filter((w) => w.ctl != null).sort((a, b) => a.date.localeCompare(b.date)).slice(-120)
+  const fitness = s.wellness.filter((w) => w.ctl != null).slice(-120)
     .map((w) => ({ date: w.date, ctl: w.ctl!, atl: w.atl ?? w.ctl! }));
 
   const needs: string[] = [];
@@ -238,7 +244,9 @@ export function viewState(s: State, today: string) {
     intervals: {
       connected: !!s.intervals.apiKey, athleteId: s.intervals.athleteId, athleteName: s.intervals.athleteName,
       lastSync: s.intervals.lastSync, lastPush: s.intervals.lastPush, lastError: s.intervals.lastError,
+      historyFrom: s.intervals.historyFrom, hidden: s.intervals.hidden ?? 0, activityCount: s.activities.length,
     },
+    history: summarizeHistory(s.activities, s.wellness, today),
     fitness, ctl: currentCtl(s) ?? null, monotony: monotony(daily),
     activities: s.activities.filter((a) => a.date >= addDays(today, -28)),
     zones: zoneTable(p), strength: strengthProgramme(p), needs,

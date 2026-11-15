@@ -12,10 +12,11 @@ export class IntervalsError extends Error {
 }
 
 const SPORT_OF: Record<string, Sport> = {
-  Ride: 'bike', VirtualRide: 'bike', GravelRide: 'bike', MountainBikeRide: 'bike', EBikeRide: 'bike', TrackRide: 'bike',
-  Run: 'run', VirtualRun: 'run', TrailRun: 'run',
+  Ride: 'bike', VirtualRide: 'bike', GravelRide: 'bike', MountainBikeRide: 'bike', EBikeRide: 'bike', EMountainBikeRide: 'bike',
+  TrackRide: 'bike', Velomobile: 'bike', Handcycle: 'bike',
+  Run: 'run', VirtualRun: 'run', TrailRun: 'run', Treadmill: 'run',
   Swim: 'swim', OpenWaterSwim: 'swim',
-  WeightTraining: 'strength', Workout: 'strength',
+  WeightTraining: 'strength', Workout: 'strength', Crossfit: 'strength', HighIntensityIntervalTraining: 'strength',
 };
 const TYPE_OF: Record<string, string> = { bike: 'Ride', run: 'Run', swim: 'Swim', strength: 'WeightTraining' };
 
@@ -62,13 +63,28 @@ export class Intervals {
     }));
   }
 
-  async activities(oldest: string, newest: string): Promise<Activity[]> {
-    const rows = await this.req('GET', `/athlete/${this.athlete}/activities?oldest=${oldest}&newest=${newest}`);
-    return (rows ?? []).filter((r: any) => r.start_date_local).map((r: any) => ({
-      id: String(r.id), date: String(r.start_date_local).slice(0, 10), sport: SPORT_OF[r.type] ?? 'other',
-      name: r.name ?? r.type ?? 'Activity', durationMin: Math.round((r.moving_time ?? r.elapsed_time ?? 0) / 60),
-      tss: Math.round(r.icu_training_load ?? 0), distanceKm: r.distance ? Math.round(r.distance / 10) / 100 : undefined,
-    }));
+  /**
+   * Activities in a date range. `hidden` counts activities Intervals.icu knows about but may not
+   * hand out over its API: anything that reached it via Strava comes back as a stub with no data
+   * (Strava's API terms), so those can only be counted, not imported.
+   */
+  async activities(oldest: string, newest: string): Promise<{ list: Activity[]; hidden: number }> {
+    const rows: any[] = (await this.req('GET', `/athlete/${this.athlete}/activities?oldest=${oldest}&newest=${newest}`)) ?? [];
+    const num = (v: any) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined);
+    const isStub = (r: any) => r?.source === 'STRAVA' && !r.type && !r.moving_time;
+    const list = rows.filter((r) => r?.start_date_local && !isStub(r)).map((r) => {
+      // icu_intensity is reported as a percentage (e.g. 78.5); normalise to a fraction.
+      const i = num(r.icu_intensity);
+      return {
+        id: String(r.id), date: String(r.start_date_local).slice(0, 10), sport: SPORT_OF[r.type] ?? 'other',
+        type: r.type ? String(r.type) : undefined,
+        name: r.name ?? r.type ?? 'Activity', durationMin: Math.round((r.moving_time ?? r.elapsed_time ?? 0) / 60),
+        tss: Math.round(r.icu_training_load ?? 0), distanceKm: r.distance ? Math.round(r.distance / 10) / 100 : undefined,
+        np: num(r.icu_weighted_avg_watts), avgHr: num(r.average_heartrate),
+        intensity: i ? Math.round(i > 3 ? i : i * 100) / 100 : undefined,
+      } as Activity;
+    });
+    return { list, hidden: rows.filter(isStub).length };
   }
 
   events(oldest: string, newest: string): Promise<any[]> {

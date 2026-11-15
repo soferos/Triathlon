@@ -68,7 +68,7 @@ const saveAndReplan = (method, path, body, msg) => act(async () => {
 }, S.season ? `${msg} Future weeks re-planned.` : msg);
 
 const VIEWS = [
-  ['today', 'Today'], ['plan', 'Plan'], ['season', 'Season'], ['races', 'Races & goals'], ['availability', 'Availability'],
+  ['today', 'Today'], ['plan', 'Plan'], ['coach', 'Coach'], ['season', 'Season'], ['history', 'History'], ['races', 'Races & goals'], ['availability', 'Availability'],
   ['workouts', 'Workouts'], ['strength', 'Strength'], ['profile', 'Profile & zones'], ['connect', 'Connect'], ['method', 'Method'],
 ];
 function go(v) { view = v; location.hash = v; render(); window.scrollTo(0, 0); }
@@ -77,7 +77,7 @@ window.addEventListener('hashchange', () => { const v = location.hash.slice(1); 
 function render() {
   $('#nav').replaceChildren(h('div', { class: 'brand' }, 'Triathlon Coach'),
     ...VIEWS.map(([id, label]) => h('button', { class: id === view ? 'on' : '', onclick: () => go(id) }, label)));
-  const fn = { today: vToday, plan: vPlan, season: vSeason, races: vRaces, availability: vAvailability, workouts: vWorkouts, strength: vStrength, profile: vProfile, connect: vConnect, method: vMethod }[view] || vToday;
+  const fn = { coach: vCoach, history: vHistory, today: vToday, plan: vPlan, season: vSeason, races: vRaces, availability: vAvailability, workouts: vWorkouts, strength: vStrength, profile: vProfile, connect: vConnect, method: vMethod }[view] || vToday;
   $('#main').replaceChildren(...[fn()].flat());
 }
 const page = (title, sub, ...actions) => h('header', { class: 'page' }, h('div', {}, h('h1', {}, title), sub && h('div', { class: 'sub' }, sub)), h('div', { class: 'row right' }, actions));
@@ -137,7 +137,8 @@ function sessionDialog(x) {
       x.status !== 'skipped' && btn('Skip', () => patch({ status: 'skipped' }, 'Skipped')),
       x.status !== 'planned' && btn('Back to planned', () => patch({ status: 'planned' }, 'Restored')),
       btn(x.locked ? 'Unpin' : 'Pin', () => patch({ locked: !x.locked }, x.locked ? 'Unpinned — may change on re-plan' : 'Pinned — survives re-planning')),
-      btn('Delete', () => act(() => api('DELETE', `/api/sessions/${x.id}`), 'Deleted').then(close), 'danger')),
+      btn('Delete', () => act(() => api('DELETE', `/api/sessions/${x.id}`), 'Deleted').then(close), 'danger'),
+      x.sport !== 'race' && btn('Ask the coach', () => { close(); askCoach(`What is the purpose of “${x.workout.name}” on ${fmtDate(x.date)}, why is it placed there, and how should I execute it?`); })),
     h('div', { class: 'row', style: 'margin-top:10px' }, field('Move to', date), btn('Move', () => patch({ date: date.value }, 'Moved and pinned'))),
   ]);
 }
@@ -442,17 +443,26 @@ function vConnect() {
     card('Intervals.icu',
       i.connected
         ? [h('div', { class: 'row' }, h('span', { class: 'pill good' }, 'Connected'), h('span', {}, `${i.athleteName || ''} ${i.athleteId ? `(${i.athleteId})` : ''}`)),
-          h('p', { class: 'muted small', style: 'margin-top:8px' }, `Last sync: ${when(i.lastSync)} · Last push: ${when(i.lastPush)}`),
+          h('p', { class: 'muted small', style: 'margin-top:8px' }, `Last sync: ${when(i.lastSync)} · Last push: ${when(i.lastPush)} · ${i.activityCount} activities imported${i.historyFrom ? ` since ${fmtDate(i.historyFrom, true)}` : ''}`),
+          i.hidden > 0 && hiddenNotice(),
           h('div', { class: 'row' },
-            btn('Sync now', () => act(() => api('POST', '/api/intervals/sync'), (r) => `Synced ${r.activities} activities, matched ${r.matched}${r.thresholdsUpdated.length ? `, updated ${r.thresholdsUpdated.join(', ')}` : ''}${r.importedRaces ? `, imported ${r.importedRaces} race(s)` : ''}`), 'primary'),
+            btn('Sync now', () => act(() => api('POST', '/api/intervals/sync', {}), (r) => `Synced: ${r.activities} activities in total, matched ${r.matched}${r.thresholdsUpdated.length ? `, updated ${r.thresholdsUpdated.join(', ')}` : ''}${r.importedRaces ? `, imported ${r.importedRaces} race(s)` : ''}`), 'primary'),
+            btn('Re-import full history', () => act(() => api('POST', '/api/intervals/sync', { full: true }), (r) => `Imported ${r.activities} activities back to ${r.historyFrom}`)),
             btn('Push next 14 days', () => act(() => api('POST', '/api/intervals/push', { days: 14 }), (r) => `Pushed ${r.pushed} workouts${r.removed ? `, removed ${r.removed} stale` : ''}`)),
             btn('Disconnect', () => confirm('Remove the stored API key?') && act(() => api('DELETE', '/api/intervals'), 'Disconnected'), 'danger'))]
         : [h('p', {}, 'In Intervals.icu open Settings → Developer Settings, create an API key and paste it here. Your athlete ID is shown on the same page.'),
           h('div', { class: 'row' }, key, id, btn('Connect', () => act(() => api('POST', '/api/intervals/connect', { apiKey: key.value, athleteId: id.value }), (r) => `Connected. ${r.activities} activities synced.`), 'primary')),
           h('p', { class: 'muted small', style: 'margin-top:8px' }, 'The key is stored only on the machine running this app (data/state.json, owner-readable) and is never sent to the browser or anywhere except intervals.icu.')]),
+    card('AI coach (Claude)',
+      h('div', { class: 'row' }, h('span', { class: `pill ${S.coach.configured ? 'good' : ''}` }, S.coach.configured ? 'Ready' : 'Not set up'), h('span', { class: 'muted small' }, `Model: ${S.coach.model}`)),
+      h('p', { style: 'margin-top:8px' }, 'The coach can discuss your plan, explain sessions and change workouts for you. It needs an Anthropic API key (console.anthropic.com → API keys); usage is billed to that key.'),
+      (() => { const k = h('input', { type: 'password', placeholder: 'sk-ant-…', autocomplete: 'off', style: 'min-width:260px' });
+        return h('div', { class: 'row' }, k, btn('Save key', () => act(() => api('PUT', '/api/coach/key', { apiKey: k.value }), k.value ? 'Key saved' : 'Key removed'), 'primary'),
+          S.coach.configured && btn('Remove key', () => act(() => api('PUT', '/api/coach/key', { apiKey: '' }), 'Key removed'), 'danger')); })(),
+      h('p', { class: 'muted small', style: 'margin-top:8px' }, 'Stored only in data/state.json on this machine, never sent to the browser. Alternatively set ANTHROPIC_API_KEY in the environment. Each message sends your plan, thresholds, recent training and readiness to the Claude API.')),
     card('What syncs',
       h('ul', { class: 'clean' },
-        h('li', {}, h('b', {}, 'In: '), 'thresholds (FTP, run power, threshold pace, CSS, LTHR), fitness/fatigue (CTL/ATL), HRV, resting HR, sleep, subjective wellness, completed activities and races on your calendar.'),
+        h('li', {}, h('b', {}, 'In: '), 'thresholds (FTP, run power, threshold pace, CSS, LTHR), your full activity history and fitness/fatigue (CTL/ATL) back to your first recorded activity, HRV, resting HR, sleep, subjective wellness, and races on your calendar. The first sync imports everything; later syncs refresh the last 60 days.'),
         h('li', {}, h('b', {}, 'Out: '), 'planned workouts as structured steps on your Intervals.icu calendar. Re-pushing updates them in place and removes ones you deleted here. Nothing else on your calendar is touched.'))),
     card('Getting workouts onto your devices',
       h('ul', { class: 'clean' },
@@ -460,6 +470,122 @@ function vConnect() {
         h('li', {}, h('b', {}, 'Garmin, Wahoo, Suunto, COROS, Zwift, etc.: '), 'enable “upload planned workouts” for the service under Intervals.icu → Settings → Connections; workouts sync automatically after each push.'),
         h('li', {}, h('b', {}, 'Run power: '), 'targets are sent as % of your run threshold power in Intervals.icu (set it under the Run sport settings, with power as the preferred target) — works with Apple Watch native running power or Stryd.'),
         h('li', {}, h('b', {}, 'Any calendar: '), h('a', { href: '/api/plan.ics' }, 'download the plan as .ics'), ' for Apple/Google Calendar.'))),
+  ];
+}
+
+const hiddenNotice = () => h('div', { class: 'notice' },
+  `${S.intervals.hidden} of your activities reached Intervals.icu through Strava. Strava’s terms stop Intervals.icu from passing those on, so they cannot be imported here (their load still counts in your fitness numbers). To get them: connect Garmin / Wahoo / Zwift / Apple Health directly to Intervals.icu, or bulk-upload your Strava export archive to Intervals.icu, then re-import.`);
+
+// ---------------- Coach ----------------
+const coach = { pending: null, changes: [], input: '' };
+function askCoach(text) { coach.input = text; go('coach'); }
+async function sendCoach() {
+  const text = coach.input.trim();
+  if (!text || coach.pending) return;
+  coach.pending = text; coach.input = ''; coach.changes = [];
+  render();
+  try {
+    const r = await api('POST', '/api/coach', { message: text });
+    coach.changes = r.changes;
+  } catch (e) { toast(e.message, true); coach.input = text; }
+  coach.pending = null;
+  await load();
+}
+function vCoach() {
+  if (!S.coach.configured) return [page('Coach', 'Talk through your plan with Claude.'), card(null, h('p', {}, 'Add an Anthropic API key to switch the coach on.'), btn('Set up under Connect', () => go('connect'), 'primary'))];
+  const msgs = [...S.coach.messages, ...(coach.pending ? [{ role: 'user', text: coach.pending }] : [])];
+  const ta = h('textarea', { placeholder: 'Ask about the plan, a session, or tell the coach what to change…', value: coach.input, rows: 3,
+    oninput: (e) => (coach.input = e.target.value), onkeydown: (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendCoach(); } } });
+  const ideas = ['Why is this week structured the way it is?', 'I only have 45 minutes tomorrow — adjust the session.', 'Make Saturday’s long ride harder; I feel good.',
+    'Compare my last 8 weeks with my best block. Am I ramping too fast?', 'I’m travelling Thursday and Friday next week with no bike. Re-plan around it.'];
+  const log = h('div', { class: 'chat' },
+    msgs.length ? msgs.map((m) => h('div', { class: `msg ${m.role}` }, m.text)) : h('div', { class: 'muted' }, 'The coach sees your profile, season, the next two weeks, recent training and today’s readiness, and can look up the rest. It can move, change, add or skip sessions when you ask.'),
+    coach.pending && h('div', { class: 'msg assistant muted' }, 'Thinking…'),
+    !coach.pending && coach.changes.length ? h('div', { class: 'notice good' }, h('b', {}, 'Plan changed: '), coach.changes.join(' '), ' ', h('a', { href: '#plan' }, 'View plan'), S.intervals.connected ? ' — push to Intervals.icu from there to update your devices.' : '') : null);
+  setTimeout(() => { log.scrollTop = log.scrollHeight; if (!coach.pending) ta.focus(); });
+  return [
+    page('Coach', `Claude (${S.coach.model}) with access to your plan and history.`,
+      S.coach.messages.length ? btn('New conversation', () => confirm('Clear this conversation?') && act(() => api('DELETE', '/api/coach'), 'Conversation cleared').then(() => (coach.changes = []))) : null),
+    h('div', { class: 'card' }, log,
+      !msgs.length && h('div', { class: 'row', style: 'margin:10px 0' }, ideas.map((t) => h('button', { class: 'btn sm', onclick: () => { coach.input = t; sendCoach(); } }, t))),
+      h('div', { class: 'row', style: 'margin-top:10px;align-items:flex-end' }, h('div', { style: 'flex:1;min-width:200px' }, ta), h('button', { class: 'btn primary', disabled: !!coach.pending, onclick: sendCoach }, 'Send'))),
+  ];
+}
+
+// ---------------- History ----------------
+const SPORT_KEYS = ['swim', 'bike', 'run', 'strength', 'other'];
+async function loadHistory(reset) {
+  const hs = draft.hist ??= { items: [], total: 0, sport: '' };
+  if (reset) hs.items = [];
+  try {
+    const r = await api('GET', `/api/history?limit=50&offset=${hs.items.length}${hs.sport ? `&sport=${hs.sport}` : ''}`);
+    hs.items.push(...r.items); hs.total = r.total; hs.loaded = true;
+  } catch (e) { toast(e.message, true); }
+  if (view === 'history') render();
+}
+function vHistory() {
+  const H = S.history;
+  if (!H) return [page('History'), card(null, h('p', {}, S.intervals.connected ? 'No activities were returned by Intervals.icu.' : 'Connect Intervals.icu to import your training history.'),
+    S.intervals.hidden > 0 && hiddenNotice(), btn(S.intervals.connected ? 'Re-import full history' : 'Connect', () => S.intervals.connected ? act(() => api('POST', '/api/intervals/sync', { full: true }), 'History imported') : go('connect'), 'primary'))];
+  const hs = draft.hist ??= { items: [], total: 0, sport: '' };
+  if (!hs.loaded) loadHistory();
+  // weekly stacked bars
+  const W = 960, Ht = 220, padL = 30, padB = 22, padT = 16, weeks = H.weeks;
+  const bw = (W - padL - 6) / Math.max(weeks.length, 1);
+  const tot = (w) => SPORT_KEYS.reduce((t, k) => t + w.min[k], 0) / 60;
+  const maxH = Math.max(4, ...weeks.map(tot));
+  const y = (v) => padT + (Ht - padT - padB) * (1 - v / maxH);
+  const g = svg('svg', { viewBox: `0 0 ${W} ${Ht}`, style: 'width:100%;height:auto', role: 'img', 'aria-label': 'Weekly training hours by sport' });
+  for (const v of [maxH / 2, maxH].map(Math.round)) g.append(svg('line', { x1: padL, x2: W, y1: y(v), y2: y(v), stroke: 'var(--line)' }), svg('text', { x: 2, y: y(v) + 4 }, `${v}h`));
+  weeks.forEach((w, i) => {
+    let acc = 0;
+    for (const k of SPORT_KEYS) {
+      const hrs = w.min[k] / 60;
+      if (!hrs) continue;
+      const r = svg('rect', { x: padL + i * bw + 1, y: y(acc + hrs), width: Math.max(1, bw - 2), height: y(acc) - y(acc + hrs), fill: k === 'other' ? 'var(--muted)' : `var(--${k})` });
+      r.append(svg('title', {}, `Week of ${fmtDate(w.start, true)} · ${SPORT[k] || 'Other'} ${hm(w.min[k])} · total ${tot(w).toFixed(1)} h · ${w.tss} TSS`));
+      g.append(r); acc += hrs;
+    }
+    if (+w.start.slice(8) <= 7) g.append(svg('text', { x: padL + i * bw, y: Ht - 6 }, MONTHS[+w.start.slice(5, 7) - 1]));
+  });
+  // all-time fitness line
+  const c = H.ctlSeries, cH = 160;
+  const cg = svg('svg', { viewBox: `0 0 ${W} ${cH}`, style: 'width:100%;height:auto', role: 'img', 'aria-label': 'Fitness over time' });
+  if (c.length > 1) {
+    const maxC = Math.max(...c.map((p) => p.ctl)) * 1.1, t0 = toDate(c[0].date).getTime(), t1 = toDate(c.at(-1).date).getTime();
+    const cx = (d) => padL + ((toDate(d).getTime() - t0) / Math.max(1, t1 - t0)) * (W - padL - 6), cy = (v) => 8 + (cH - 30) * (1 - v / maxC);
+    for (const v of [maxC / 2.2, maxC / 1.1].map(Math.round)) cg.append(svg('line', { x1: padL, x2: W, y1: cy(v), y2: cy(v), stroke: 'var(--line)' }), svg('text', { x: 2, y: cy(v) + 4 }, v));
+    cg.append(svg('polyline', { fill: 'none', stroke: 'var(--accent)', 'stroke-width': 2, points: c.map((p) => `${cx(p.date)},${cy(p.ctl)}`).join(' ') }));
+    let lastYear = '';
+    for (const p of c) if (p.date.slice(0, 4) !== lastYear) { lastYear = p.date.slice(0, 4); cg.append(svg('text', { x: cx(p.date), y: cH - 6 }, lastYear)); }
+  }
+  const stat = (label, value, sub) => h('div', { class: 'card', style: 'margin:0' }, h('div', { class: 'label' }, label), h('div', { class: 'stat num' }, value), sub && h('div', { class: 'muted small' }, sub));
+  const L = H.longest;
+  const filter = h('select', { onchange: (e) => { hs.sport = e.target.value; loadHistory(true); } }, [['', 'All sports'], ...SPORT_KEYS.map((k) => [k, SPORT[k] || 'Other'])].map(([v, l]) => h('option', { value: v, selected: hs.sport === v }, l)));
+  return [
+    page('Training history', `${H.count} activities since ${fmtDate(H.from, true)}, imported from Intervals.icu.`,
+      S.intervals.connected && btn('Sync now', () => act(() => api('POST', '/api/intervals/sync', {}), (r) => `${r.activities} activities in total`).then(() => loadHistory(true)))),
+    S.intervals.hidden > 0 && hiddenNotice(),
+    h('div', { class: 'grid g3', style: 'grid-template-columns:repeat(auto-fit,minmax(170px,1fr));margin-bottom:14px' },
+      stat('Last 4 weeks', `${H.avg4wkHours} h/wk`, `12-week average ${H.avg12wkHours} h/wk`),
+      H.best6wk && stat('Best 6-week block', `${H.best6wk.hours} h/wk`, `ending ${fmtDate(H.best6wk.end, true)}`),
+      H.peakCtl && stat('Peak fitness (CTL)', H.peakCtl.value.toFixed(0), `${fmtDate(H.peakCtl.date, true)}${S.ctl != null ? ` · now ${S.ctl.toFixed(0)}` : ''}`),
+      ...['bike', 'run', 'swim'].filter((k) => L[k]).map((k) => stat(`Longest ${k} (12 mo)`, hm(L[k].min), `${L[k].km ? `${L[k].km} km · ` : ''}${fmtDate(L[k].date, true)}`))),
+    card('Weekly volume — last 52 weeks', g, h('div', { class: 'legend' }, SPORT_KEYS.map((k) => h('span', {}, h('i', { style: `background:${k === 'other' ? 'var(--muted)' : `var(--${k})`}` }), SPORT[k] || 'Other')))),
+    c.length > 1 && card('Fitness (CTL) — all time', cg),
+    card('Year by year', h('div', { class: 'scroll' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Year', 'Sessions', 'Hours', 'Swim', 'Bike', 'Run', 'Strength', 'TSS'].map((x) => h('th', {}, x)))),
+      h('tbody', {}, H.years.map((yr) => h('tr', {}, h('td', {}, h('b', {}, yr.year)), h('td', { class: 'num' }, yr.count), h('td', { class: 'num' }, SPORT_KEYS.reduce((t, k) => t + yr.hours[k], 0)),
+        h('td', { class: 'num' }, `${yr.hours.swim} h · ${yr.km.swim} km`), h('td', { class: 'num' }, `${yr.hours.bike} h · ${yr.km.bike} km`), h('td', { class: 'num' }, `${yr.hours.run} h · ${yr.km.run} km`),
+        h('td', { class: 'num' }, `${yr.hours.strength} h`), h('td', { class: 'num' }, yr.tss))))))),
+    card('Activities', h('div', { class: 'row', style: 'margin-bottom:8px' }, filter, h('span', { class: 'muted small' }, `${hs.items.length} of ${hs.total}`)),
+      h('div', { class: 'scroll' }, h('table', {},
+        h('thead', {}, h('tr', {}, ['Date', 'Sport', 'Activity', 'Time', 'Distance', 'TSS', 'NP', 'Avg HR', 'IF'].map((x) => h('th', {}, x)))),
+        h('tbody', {}, hs.items.map((a) => h('tr', { class: a.sport }, h('td', { class: 'num', style: 'white-space:nowrap' }, fmtDate(a.date, true)),
+          h('td', {}, h('span', { class: 'row', style: 'flex-wrap:nowrap' }, h('span', { class: 'dot', style: `background:var(--c, var(--muted))` }), a.type || a.sport)), h('td', {}, a.name),
+          h('td', { class: 'num' }, hm(a.durationMin)), h('td', { class: 'num' }, a.distanceKm ? `${a.distanceKm} km` : ''), h('td', { class: 'num' }, a.tss || ''),
+          h('td', { class: 'num' }, a.np ? `${Math.round(a.np)} W` : ''), h('td', { class: 'num' }, a.avgHr ? Math.round(a.avgHr) : ''), h('td', { class: 'num' }, a.intensity ?? '')))))),
+      hs.items.length < hs.total && h('div', { style: 'margin-top:10px' }, btn('Show more', () => loadHistory()))),
   ];
 }
 

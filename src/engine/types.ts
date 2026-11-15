@@ -155,4 +155,8 @@ export interface Checkin {
 export interface Activity {
   id: string; date: string; sport: Sport | 'other'; name: string;
   durationMin: number; tss: number; distanceKm?: number;
+  /** Raw Intervals.icu activity type, e.g. VirtualRide, TrailRun, NordicSki */
+  type?: string;
+  /** Normalised power (W), average HR (bpm), intensity factor (0..1.x) when available */
+  np?: number; avgHr?: number; intensity?: number;
 }
