@@ -22,7 +22,29 @@ before(async () => {
     claude.headers.push(req.headers);
     const send = (code: number, data: unknown) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)); };
     if (claude.fail) { claude.fail = 0; return send(401, { type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } }); }
-    const msg = (content: unknown[], stop_reason: string) => send(200, {
+    // Streaming requests get the same content as server-sent events, the way the real API frames them.
+    const sse = (content: any[], stop_reason: string) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      const ev = (type: string, data: object) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+      ev('message_start', { message: { id: 'msg_s', type: 'message', role: 'assistant', model: body.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 } } });
+      content.forEach((b, index) => {
+        if (b.type === 'text') {
+          ev('content_block_start', { index, content_block: { type: 'text', text: '' } });
+          for (const piece of b.text.match(/.{1,9}/gs) ?? []) ev('content_block_delta', { index, delta: { type: 'text_delta', text: piece } });
+        } else if (b.type === 'tool_use') {
+          ev('content_block_start', { index, content_block: { type: 'tool_use', id: b.id, name: b.name, input: {} } });
+          ev('content_block_delta', { index, delta: { type: 'input_json_delta', partial_json: JSON.stringify(b.input) } });
+        } else if (b.type === 'thinking') {
+          ev('content_block_start', { index, content_block: { type: 'thinking', thinking: '', signature: '' } });
+          ev('content_block_delta', { index, delta: { type: 'signature_delta', signature: b.signature } });
+        }
+        ev('content_block_stop', { index });
+      });
+      ev('message_delta', { delta: { stop_reason, stop_sequence: null }, usage: { output_tokens: 10 } });
+      ev('message_stop', {});
+      res.end();
+    };
+    const msg = (content: unknown[], stop_reason: string) => body.stream ? sse(content as any[], stop_reason) : send(200, {
       id: `msg_${claude.requests.length}`, type: 'message', role: 'assistant', model: body.model, content, stop_reason, stop_sequence: null,
       usage: { input_tokens: 10, output_tokens: 10 },
     });
@@ -143,4 +165,38 @@ test('weekly debrief is written by the coach and stored for the week', async () 
   const { data } = await api('GET', '/api/state');
   assert.equal(data.debrief.week, '2026-11-09');
   assert.ok(data.debrief.text.length > 5);
+});
+
+test('streamed coach reply: text arrives in pieces, tools still run, and the change can be undone', async () => {
+  await api('DELETE', '/api/coach');
+  await api('POST', '/api/plan/generate', { scope: 'week' });
+  const before = (await api('GET', '/api/state')).data;
+  const ride = before.sessions.find((x: any) => x.workout.name === 'Long ride' && x.date <= '2026-11-15');
+  await api('PATCH', `/api/sessions/${ride.id}`, { date: '2026-11-14' }); // an earlier test left it on Sunday
+  const res = await fetch(base + '/api/coach/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'Move my long ride to Sunday please' }) });
+  assert.equal(res.headers.get('content-type'), 'text/event-stream; charset=utf-8');
+  const events = (await res.text()).split('\n\n').filter(Boolean).map((l) => JSON.parse(l.replace(/^data: /, '')));
+  const pieces = events.filter((e) => e.type === 'text').map((e) => e.text);
+  assert.ok(pieces.length > 3, 'reply is streamed in several pieces');
+  assert.equal(pieces.join(''), 'Shifting it.\n\nMoved your long ride to Sunday.');
+  const done = events.at(-1);
+  assert.equal(done.type, 'done');
+  assert.equal(done.changes.length, 1);
+  assert.equal(claude.requests.at(-1).stream, true);
+  // the replayed assistant turn still carries the thinking block and the full tool input
+  const replay = claude.requests.at(-1).messages.at(-2).content;
+  assert.deepEqual(replay[0], { type: 'thinking', thinking: '', signature: 'sig-abc' });
+  assert.deepEqual(replay.at(-1).input, { id: ride.id, date: '2026-11-15' });
+  let { data } = await api('GET', '/api/state');
+  assert.equal(data.sessions.find((x: any) => x.id === ride.id).date, '2026-11-15');
+  assert.equal(data.undo.label, 'Changes made by the coach');
+  await api('POST', '/api/undo', {});
+  data = (await api('GET', '/api/state')).data;
+  assert.equal(data.sessions.find((x: any) => x.id === ride.id).date, '2026-11-14');
+  // a question that changes nothing leaves no undo point behind
+  const depth = data.undo?.depth ?? 0;
+  claude.fail = 1;
+  const failed = await (await fetch(base + '/api/coach/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'hello' }) })).text();
+  assert.match(failed, /"type":"error"/);
+  assert.equal(((await api('GET', '/api/state')).data.undo?.depth ?? 0), depth);
 });

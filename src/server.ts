@@ -5,9 +5,9 @@ import { extname, join, normalize } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 import { Store } from './store.ts';
 import { addDays, localToday, mondayOf } from './engine/dates.ts';
-import { applyReadiness, customWorkout, ensureHorizon, generate, reconcile, toIcs, uid, viewState } from './engine/plan.ts';
+import { applyReadiness, customWorkout, discardSnapshot, ensureHorizon, generate, previewWeek, reconcile, sessionSig, snapshot, toIcs, uid, undo, viewState } from './engine/plan.ts';
 import { assessReadiness } from './engine/readiness.ts';
-import { applyAdaptations, proposeAdaptations } from './engine/adapt.ts';
+import { aerobicVersion, applyAdaptations, proposeAdaptations, resized } from './engine/adapt.ts';
 import { analyzeExecution, applyProgress, plannedReps } from './engine/execution.ts';
 import { buildLeg } from './engine/course.ts';
 import { Intervals, IntervalsError, racesFrom, thresholdsFrom } from './intervals.ts';
@@ -20,6 +20,21 @@ const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml', '.json': 'application/json', '.webmanifest': 'application/manifest+json',
 };
+
+/** Validate the weekly availability pattern: optional daily limits and the days the athlete has fixed. */
+function parseAvailability(b: any) {
+  const dayList = (v: any) => (Array.isArray(v) ? [...new Set(v.map(Number).filter((n: number) => Number.isInteger(n) && n >= 0 && n <= 6))].sort() : undefined);
+  const one = (v: any) => (v === null || v === undefined || v === '' || !Number.isInteger(Number(v)) || Number(v) < 0 || Number(v) > 6 ? undefined : Number(v));
+  const f = b.fixed ?? {};
+  const swim = dayList(f.swim), strength = dayList(f.strength);
+  return {
+    days: b.days.map((d: any) => ({
+      minutes: d?.minutes === null || d?.minutes === undefined || d?.minutes === '' ? null : Math.max(0, Math.min(600, Number(d.minutes) || 0)),
+      pool: !!d?.pool, gym: !!d?.gym,
+    })),
+    fixed: { swim: swim?.length ? swim : undefined, strength: strength?.length ? strength : undefined, longRide: one(f.longRide), longRun: one(f.longRun), rest: one(f.rest) },
+  };
+}
 
 class HttpError extends Error {
   status: number;
@@ -119,7 +134,9 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
         graded++;
       } catch (e) { if (!(e instanceof IntervalsError)) throw e; }
     }
+    if (s().profile.autoAdapt) snapshot(s(), 'Automatic adjustments after sync');
     const adapted = s().profile.autoAdapt ? applyAdaptations(s(), t) : [];
+    if (s().profile.autoAdapt && !adapted.length) discardSnapshot(s());
     s().intervals.lastSync = new Date().toISOString();
     s().intervals.lastError = undefined;
     return {
@@ -129,6 +146,15 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
   }
 
   let busy = false;
+  /** One coach turn with an undo point: kept only if the coach actually changed the plan. */
+  async function runCoach(message: string, onText?: (t: string) => void) {
+    snapshot(s(), 'Changes made by the coach');
+    try {
+      const r = await coachTurn(s(), today(), message, onText);
+      if (!r.changes.length) discardSnapshot(s());
+      return r;
+    } catch (e) { discardSnapshot(s()); throw e; }
+  }
   const routes: Record<string, (req: IncomingMessage, id?: string) => Promise<unknown>> = {
     'GET /api/state': async () => {
       if (ensureHorizon(s(), today())) store.save();
@@ -141,7 +167,7 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       if (!message) throw new HttpError(400, 'Message is empty');
       if (busy) throw new HttpError(409, 'The coach is still answering your previous message.');
       busy = true;
-      try { return { ok: true, ...(await coachTurn(s(), today(), message)) }; } finally { busy = false; }
+      try { return { ok: true, ...(await runCoach(message)) }; } finally { busy = false; }
     },
     'DELETE /api/coach': async () => { s().coach.messages = []; return { ok: true }; },
     // A written review of the week just finished, produced by the coach on request.
@@ -203,17 +229,31 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       for (const [k, v] of Object.entries<any>(b.overrides ?? {})) {
         if (isDate(k)) overrides[k] = { minutes: Math.max(0, Math.min(600, Number(v?.minutes) || 0)), note: v?.note ? String(v.note).slice(0, 80) : undefined };
       }
-      s().availability = {
-        days: b.days.map((d: any) => ({ minutes: Math.max(0, Math.min(600, Number(d?.minutes) || 0)), pool: !!d?.pool, gym: !!d?.gym })),
-        overrides,
-      };
+      s().availability = { ...parseAvailability(b), overrides };
       return { ok: true };
+    },
+    // What the plan would lay out under a draft availability; saves nothing.
+    'POST /api/availability/preview': async (req) => {
+      const b = await body(req);
+      if (!Array.isArray(b.availability?.days) || b.availability.days.length !== 7) throw new HttpError(400, 'Expected 7 days');
+      return previewWeek(s(), today(), { ...parseAvailability(b.availability), overrides: {} }, b.week === 'peak' ? 'peak' : 'next');
+    },
+    'POST /api/undo': async () => {
+      const label = undo(s());
+      if (!label) throw new HttpError(400, 'Nothing to undo');
+      return { ok: true, label };
     },
 
     'PUT /api/races': async (req) => {
       const b = await body(req);
       if (!Array.isArray(b)) throw new HttpError(400, 'Expected a list');
       const types = ['sprint', 'olympic', 'half', 'full', 'duathlonSprint', 'duathlon', 'aquathlon', 'run10k', 'halfMarathon', 'marathon', 'bikeEvent', 'other'];
+      const seen = new Set<string>();
+      for (const r of b) {
+        const k = `${String(r?.name ?? '').trim().toLowerCase()}|${r?.date}`;
+        if (seen.has(k)) throw new HttpError(400, `“${r.name}” on ${r.date} is listed twice. Remove the duplicate.`);
+        seen.add(k);
+      }
       const prev = new Map(s().races.map((r) => [r.id, r]));
       s().races = b.filter((r: any) => isDate(r?.date) && r?.name).slice(0, 40).map((r: any) => ({
         // Course and target splits are edited separately and must survive a save of the list.
@@ -296,6 +336,7 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
 
     'POST /api/plan/generate': async (req) => {
       const b = await body(req);
+      if (s().season) snapshot(s(), b.scope === 'week' ? 'Re-plan from today' : 'Re-plan of future weeks');
       generate(s(), today(), b.scope === 'week' ? 'week' : 'future');
       return { ok: true, warnings: s().season?.warnings ?? [] };
     },
@@ -319,6 +360,7 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       const lib = b.libraryId ? s().library.find((l) => l.id === b.libraryId) : undefined;
       if (b.libraryId && !lib) throw new HttpError(404, 'Workout not found');
       const workout = lib ? structuredClone(lib.workout) : customWorkout(b.workout, s().profile);
+      snapshot(s(), `Adding “${workout.name}”`);
       const session: Session = { id: uid('s'), date: b.date, sport: workout.sport, role: workout.hard ? 'key' : 'easy', workout, status: 'planned', locked: true, origin: 'custom' };
       s().sessions.push(session);
       s().sessions.sort((a, c) => a.date.localeCompare(c.date));
@@ -328,9 +370,18 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       const b = await body(req);
       const x = s().sessions.find((q) => q.id === id);
       if (!x) throw new HttpError(404, 'Session not found');
-      if (b.date !== undefined) {
-        if (!isDate(b.date)) throw new HttpError(400, 'Invalid date');
-        x.date = b.date; x.locked = true;
+      if (b.date !== undefined && !isDate(b.date)) throw new HttpError(400, 'Invalid date');
+      if (b.locked === undefined || Object.keys(b).length > 1) snapshot(s(), `Change to “${x.workout.name}”`);
+      if (b.date !== undefined) { x.date = b.date; x.locked = true; }
+      // Quick edits: resize an aerobic session, or swap a hard one for its easy equivalent.
+      if (b.minutes !== undefined || b.easy) {
+        const wk = s().season?.weeks.find((w) => x.date >= w.start && x.date <= addDays(w.start, 6)) ?? s().season?.weeks[0];
+        const w = b.easy ? aerobicVersion(x, s().profile) : wk ? resized(x, Math.max(15, Math.min(480, Math.round(Number(b.minutes) / 5) * 5)), wk, s().profile) : null;
+        if (!w) { discardSnapshot(s()); throw new HttpError(400, b.easy ? 'This session has no easy version.' : 'Interval sessions cannot be resized here — ask the coach, or replace it from your library.'); }
+        const before = x.workout.name;
+        x.workout = w; x.locked = true; x.origin = 'adapted';
+        if (b.easy) x.role = 'easy';
+        x.adaptedNote = b.easy ? `Made easy by you (was “${before}”).` : `Resized by you to ${w.durationMin} min.`;
       }
       if (['planned', 'done', 'skipped'].includes(b.status)) { x.status = b.status; x.locked = b.status !== 'planned' || x.locked; }
       if (b.locked !== undefined) x.locked = !!b.locked;
@@ -338,6 +389,8 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       return { ok: true };
     },
     'DELETE /api/sessions/:id': async (_req, id) => {
+      const gone = s().sessions.find((q) => q.id === id);
+      if (gone) snapshot(s(), `Deleting “${gone.workout.name}”`);
       s().sessions = s().sessions.filter((q) => q.id !== id);
       return { ok: true };
     },
@@ -356,11 +409,18 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
     },
     'POST /api/readiness/apply': async () => {
       const t = today();
+      snapshot(s(), 'Readiness adjustment');
       const changes = applyReadiness(s(), t, assessReadiness(t, s().wellness, s().checkins[t]));
+      if (!changes.length) discardSnapshot(s());
       return { ok: true, changes };
     },
 
-    'POST /api/adapt/apply': async () => ({ ok: true, changes: applyAdaptations(s(), today()) }),
+    'POST /api/adapt/apply': async () => {
+      snapshot(s(), 'Suggested adjustments');
+      const changes = applyAdaptations(s(), today());
+      if (!changes.length) discardSnapshot(s());
+      return { ok: true, changes };
+    },
     'POST /api/adapt/dismiss': async (req) => {
       const key = String((await body(req)).key ?? '');
       if (proposeAdaptations(s(), today()).some((a) => a.key === key)) (s().dismissedAdapt ??= []).push(key);
@@ -390,7 +450,9 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       const t = today();
       const r = await client().pushSessions(s().sessions, s().profile, t, addDays(t, days - 1));
       s().intervals.lastPush = new Date().toISOString();
-      return { ok: true, ...r };
+      // Remember exactly what the devices now hold, so later edits can be flagged as not yet sent.
+      s().intervals.pushed = Object.fromEntries(s().sessions.filter((x) => r.ids.includes(x.id)).map((x) => [x.id, sessionSig(x, s().profile)]));
+      return { ok: true, pushed: r.pushed, removed: r.removed };
     },
     'DELETE /api/intervals': async () => { s().intervals = {}; return { ok: true }; },
   };
@@ -418,6 +480,24 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
         // Same-origin only: state-changing requests must be JSON from our own pages.
         if (req.method !== 'GET' && req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) throw new HttpError(403, 'Cross-origin request refused');
         if (req.method === 'GET' && url.pathname === '/api/history') return send(200, await routes['GET /api/history'](req));
+        // Streaming coach reply: server-sent events carrying text as it is written, then the result.
+        if (req.method === 'POST' && url.pathname === '/api/coach/stream') {
+          const b = await body(req);
+          const message = String(b.message ?? '').trim().slice(0, 8000);
+          if (!message) throw new HttpError(400, 'Message is empty');
+          if (busy) throw new HttpError(409, 'The coach is still answering your previous message.');
+          busy = true;
+          res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+          const emit = (data: unknown) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+          try {
+            const r = await runCoach(message, (text) => emit({ type: 'text', text }));
+            emit({ type: 'done', ...r });
+          } catch (e: any) {
+            emit({ type: 'error', error: e instanceof CoachError || e instanceof HttpError ? e.message : 'The coach hit an internal error.' });
+            if (!(e instanceof CoachError)) console.error(e);
+          } finally { busy = false; store.save(); res.end(); }
+          return;
+        }
         if (req.method === 'GET' && url.pathname === '/api/plan.ics') return send(200, toIcs(s(), today()), 'text/calendar; charset=utf-8');
         const parts = url.pathname.split('/');
         let key = `${req.method} ${url.pathname}`;

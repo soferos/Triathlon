@@ -83,7 +83,10 @@ function layout(week: SeasonWeek, profile: Profile, availability: Availability, 
   if (fx.rest != null) days[fx.rest].blocked = true;
   else if (p.restDay && open() === 7) {
     // Protect one full rest day: the day with the least time, preferring Monday then Friday.
-    const order = [0, 4, 1, 2, 3, 5, 6];
+    // Never on a day the athlete has committed to something.
+    const taken = new Set([...(fx.swim ?? []), ...(fx.strength ?? []), fx.longRide, fx.longRun].filter((d) => d != null));
+    const all = [0, 4, 1, 2, 3, 5, 6];
+    const order = all.some((i) => !taken.has(i)) ? all.filter((i) => !taken.has(i)) : all;
     const rest = order.reduce((best, i) => (days[i].cap < days[best].cap ? i : best), order[0]);
     days[rest].blocked = true;
   }

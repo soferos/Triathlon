@@ -35,7 +35,7 @@ const hm = (min: number) => `${Math.floor(min / 60)}:${String(Math.round(min % 6
 const r5 = (n: number) => Math.max(5, Math.round(n / 5) * 5);
 
 /** Rebuild an aerobic session at a new duration; null when the workout type cannot be resized. */
-function resized(x: Session, minutes: number, wk: SeasonWeek, p: Profile): Workout | null {
+export function resized(x: Session, minutes: number, wk: SeasonWeek, p: Profile): Workout | null {
   switch (x.workout.code) {
     case 'bike.endurance': return bike.endurance(minutes, 0, p);
     case 'bike.recovery': return bike.recovery(minutes, 0, p);

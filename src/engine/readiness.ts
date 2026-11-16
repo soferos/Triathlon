@@ -65,7 +65,7 @@ export function assessReadiness(today: string, wellness: Wellness[], checkin?: C
     const rel = tsb / lastW.ctl;
     const status: Signal['status'] = rel < -0.4 ? 'bad' : rel < -0.25 ? 'warn' : 'good';
     penalty += rel < -0.4 ? 20 : rel < -0.25 ? 8 : 0;
-    signals.push({ key: 'form', label: 'Form', value: `${tsb.toFixed(0)} (fitness ${lastW.ctl.toFixed(0)}, fatigue ${lastW.atl.toFixed(0)})`, status, detail: rel < -0.25 ? 'Deep in the hole relative to your fitness. Productive only if planned and short-lived.' : 'Fatigue is proportionate to fitness.' });
+    signals.push({ key: 'form', label: 'Form', value: `${tsb.toFixed(0)} (fitness ${lastW.ctl.toFixed(0)}, fatigue ${lastW.atl.toFixed(0)})`, status, detail: rel < -0.4 ? 'Deep in the hole relative to your fitness. Productive only if planned and short-lived.' : rel < -0.25 ? 'Carrying real fatigue relative to your fitness. Normal late in a loading week; watch the trend.' : 'Fatigue is proportionate to fitness.' });
   }
 
   // --- Subjective (check-in 1..5, or Intervals.icu wellness 1..4) ---

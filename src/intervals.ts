@@ -124,7 +124,7 @@ export class Intervals {
         removed++;
       }
     }
-    return { pushed: payload.length, removed };
+    return { pushed: payload.length, removed, ids: wanted.map((x) => x.id) };
   }
 }
 

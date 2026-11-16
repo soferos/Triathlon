@@ -25,10 +25,13 @@ Then, in the app:
 1. **Connect** → paste your Intervals.icu API key (Intervals.icu → Settings → Developer Settings).
    Thresholds, your full activity history, fitness (CTL/ATL), HRV, resting HR, sleep and calendar
    races are pulled in. Optionally add an Anthropic API key on the same page to switch on the coach.
-2. **Profile & zones** → check thresholds, max weekly hours, and how long you were off.
-3. **Availability** → minutes per weekday, pool and gym access, date-specific exceptions.
-4. **Races & goals** → A/B/C races and season / long-term goals.
-5. **Today** → *Generate my plan*, then **Plan** → *Push to Intervals.icu*.
+2. **Setup → Profile & zones** → check thresholds, max weekly hours, and how long you were off.
+3. **Setup → Availability** → see the optimal week, then fix days or cap them where you must.
+4. **Setup → Races & goals** → A/B/C races (past ones too) and season / long-term goals.
+5. **Today** → *Generate my plan*, then **Plan** → *Push to devices*.
+
+The app has five destinations — Today, Plan, Coach, Progress (season, history, insights) and Setup —
+and the Today page walks a new install through these steps.
 
 ### Configuration
 
@@ -58,8 +61,14 @@ the Claude API.
   maintenance) to the ones that are.
 - **Return to training** — a 2–6 week rebuild block sized by how long you were off: frequency, then
   volume, then intensity; bike intensity returns before run intensity; ends with re-testing.
-- **Availability-aware weeks** — long sessions on your big days, hard days spaced apart, swims only
-  on pool days, strength consolidated onto hard days, one protected rest day, travel exceptions.
+- **Optimal week first** — by default no day has a time limit, so the plan lays out the week it
+  would choose: long ride Saturday, long run Sunday, hard days spaced apart, strength consolidated
+  onto hard days, one rest day. You then negotiate it down: fix swim, strength, long-ride, long-run
+  and rest days, cap any day's time, and mark pool and gym access. A live preview re-flows the week
+  on every change and shows what your limits cost against the optimal week, for a typical week now
+  or the biggest week of the season. Date-specific exceptions cover travel.
+- **Every week hits its own load target** — a corrective pass re-sizes the generated week to the
+  target, and warnings about sessions that would not fit point at the limit responsible.
 - **Structured workouts by power** — bike (FTP) and run (threshold/critical power), with pace or HR
   as alternatives per sport; swim sets from critical swim speed. VO2max (incl. 30/15s), threshold,
   over-unders, sweet spot, race-pace, durability long rides, bricks, hills, progression runs, tests.
@@ -99,13 +108,19 @@ the Claude API.
   click, keep the plan as is, or switch on automatic application in Profile.
 - **Closed loop** — completed activities are matched to planned sessions; each re-plan starts from
   the fitness you actually have, so missed training is never "made up" by cramming.
-- **AI coach** — a Claude-backed chat that sees your profile, season, upcoming sessions, readiness
+- **AI coach** — a streaming Claude-backed chat that sees your profile, season, upcoming sessions, readiness
   and training history. Ask why a session is there or how to execute it, or tell it what to change:
   it can move, replace, add, skip and delete sessions, set availability for specific dates and
   re-plan. Changes are pinned and listed back to you; nothing reaches your devices until you push.
 - **Training history** — the first sync imports every activity back to your first one (later syncs
   refresh the last 60 days): weekly volume by sport, all-time fitness curve, yearly totals, longest
   sessions, and a filterable activity list.
+- **Undo** — re-plans, applied adjustments, coach changes, quick edits and deletions leave an undo
+  point (the last ten are kept); the confirmation offers Undo and so does the Plan menu.
+- **Device sync state** — the app remembers what it last pushed to Intervals.icu and flags sessions
+  in the next two weeks that have changed or been removed since, on the Plan page and in the menu.
+- **Quick edits and review** — lengthen or shorten an aerobic session by 15 minutes, or make a hard
+  one easy, from its dialog; the four weeks just gone stay viewable in the Plan.
 - **Goals** — performance, health, skill and life goals for the season and the long term.
 - **Export** — structured workouts to Intervals.icu; `.ics` calendar feed for anything else.
 

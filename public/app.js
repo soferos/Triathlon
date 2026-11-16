@@ -42,7 +42,7 @@ const RACE_TYPES = { sprint: 'Sprint triathlon', olympic: 'Olympic triathlon', h
 
 let S = null;
 let view = location.hash.slice(1) || 'today';
-let planWeek = 0;
+let planWeek = null; // index into S.weekStats; null = the current week
 const draft = {}; // unsaved form state per view
 
 async function api(method, path, body) {
@@ -51,10 +51,12 @@ async function api(method, path, body) {
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
 }
-function toast(msg, bad) {
+// A toast can carry one action (used for Undo).
+function toast(msg, bad, action) {
   const t = $('#toast');
-  t.textContent = msg; t.className = bad ? 'bad' : ''; t.style.display = 'block';
-  clearTimeout(toast.t); toast.t = setTimeout(() => (t.style.display = 'none'), bad ? 6000 : 3200);
+  t.replaceChildren(...[h('span', {}, msg), action && h('button', { class: 'btn sm', onclick: () => { t.style.display = 'none'; action.run(); } }, action.label)].filter(Boolean));
+  t.className = bad ? 'bad' : ''; t.style.display = 'flex';
+  clearTimeout(toast.t); toast.t = setTimeout(() => (t.style.display = 'none'), bad ? 7000 : action ? 8000 : 3200);
 }
 async function load() { S = await api('GET', '/api/state'); render(); }
 // Pull new activities from Intervals.icu without being asked: on open and when the tab regains focus, at most every 10 minutes.
@@ -62,44 +64,102 @@ let syncing = false;
 async function autoSync() {
   if (!S?.intervals.connected || syncing || document.hidden) return;
   if (S.intervals.lastSync && Date.now() - new Date(S.intervals.lastSync).getTime() < 10 * 60 * 1000) return;
-  syncing = true;
+  syncing = true; renderNav();
   try {
     const r = await api('POST', '/api/intervals/sync', {});
+    syncing = false;
     await load();
-    if (r.adapted?.length) toast(`Plan adapted: ${r.adapted.join(' ')}`);
+    if (r.adapted?.length) toast(`Plan adapted: ${r.adapted.join(' ')}`, false, { label: 'Undo', run: doUndo });
     else if (r.graded) toast(`${r.graded} key ${r.graded === 1 ? 'session' : 'sessions'} graded against the plan`);
     else if (r.matched) toast(`${r.matched} completed ${r.matched === 1 ? 'activity' : 'activities'} matched to your plan`);
-  } catch { await load().catch(() => {}); }
-  syncing = false;
+  } catch { syncing = false; await load().catch(() => {}); }
 }
 document.addEventListener('visibilitychange', autoSync);
+// Run an action, reload, confirm. If the action left an undo point, the confirmation offers Undo.
 async function act(fn, ok) {
-  try { const r = await fn(); await load(); if (ok) toast(typeof ok === 'function' ? ok(r) : ok); return r; }
-  catch (e) { toast(e.message, true); }
+  const before = S?.undo?.at;
+  try {
+    const r = await fn(); await load();
+    const undoable = S.undo && S.undo.at !== before;
+    if (ok) toast(typeof ok === 'function' ? ok(r) : ok, false, undoable ? { label: 'Undo', run: doUndo } : null);
+    return r;
+  } catch (e) { toast(e.message, true); }
 }
+const doUndo = () => act(() => api('POST', '/api/undo', {}), (r) => `Undone: ${r.label}`);
 // Saving inputs that shape the plan regenerates future weeks (the current week is left alone).
 const saveAndReplan = (method, path, body, msg) => act(async () => {
   await api(method, path, body);
   if (S.season) await api('POST', '/api/plan/generate', {});
 }, S.season ? `${msg} Future weeks re-planned.` : msg);
 
-const VIEWS = [
-  ['today', 'Today'], ['plan', 'Plan'], ['coach', 'Coach'], ['season', 'Season'], ['history', 'History'], ['insights', 'Insights'], ['races', 'Races & goals'], ['availability', 'Availability'],
-  ['workouts', 'Workouts'], ['strength', 'Strength'], ['profile', 'Profile & zones'], ['connect', 'Connect'], ['method', 'Method'],
-];
-function go(v) { view = v; location.hash = v; render(); window.scrollTo(0, 0); }
-window.addEventListener('hashchange', () => { const v = location.hash.slice(1); if (v && v !== view) { view = v; render(); } });
+// Five destinations; Progress and Setup hold sub-pages.
+const NAV = [['today', 'Today'], ['plan', 'Plan'], ['coach', 'Coach'], ['progress', 'Progress'], ['setup', 'Setup']];
+const GROUPS = {
+  progress: [['season', 'Season'], ['history', 'History'], ['insights', 'Insights']],
+  setup: [['profile', 'Profile & zones'], ['availability', 'Availability'], ['races', 'Races & goals'], ['workouts', 'Workouts'], ['strength', 'Strength'], ['connect', 'Connect'], ['method', 'Method']],
+};
+const groupOf = (v) => Object.keys(GROUPS).find((g) => GROUPS[g].some(([id]) => id === v));
+const lastSub = {};
+// Unsaved edits: views that keep a draft register a save function and show a save bar once touched.
+const dirty = {}, savers = {};
+const DRAFTS = { profile: ['profile'], availability: ['availability', 'overrides', 'preview'], races: ['races', 'goals'] };
+function setDirty(v, on = true) { dirty[v] = on; const bar = $('#savebar'); if (bar) bar.hidden = !dirty[view]; }
+function discard(v) { for (const k of DRAFTS[v] || []) delete draft[k]; setDirty(v, false); }
+function go(v) {
+  if (GROUPS[v]) v = lastSub[v] || GROUPS[v][0][0];
+  if (v === view) return;
+  if (dirty[view]) { if (!confirm('You have unsaved changes on this page. Leave without saving?')) { location.hash = view; return; } discard(view); }
+  view = v; location.hash = v; render(); window.scrollTo(0, 0);
+}
+window.addEventListener('hashchange', () => { const v = location.hash.slice(1); if (v && v !== view) go(v); });
+window.addEventListener('beforeunload', (e) => { if (dirty[view]) e.preventDefault(); });
+document.addEventListener('input', (e) => { if (DRAFTS[view] && e.target.closest('#main') && !e.target.closest('[data-nodraft]')) setDirty(view); });
+document.addEventListener('change', (e) => { if (DRAFTS[view] && e.target.closest('#main') && !e.target.closest('[data-nodraft]')) setDirty(view); });
 
+function renderNav() {
+  const g = groupOf(view);
+  $('#nav').replaceChildren(h('div', { class: 'brand' }, 'Triathlon Coach', syncing ? h('div', { class: 'muted small syncing' }, 'Syncing…') : null),
+    ...NAV.map(([id, label]) => h('button', { class: id === view || id === g ? 'on' : '', onclick: () => go(id) }, label,
+      id === 'plan' && S?.unsynced && !S.unsynced.never && S.unsynced.changed + S.unsynced.removed > 0 ? h('span', { class: 'badge', title: 'Changes not yet on your devices' }, S.unsynced.changed + S.unsynced.removed) : null,
+      id === 'today' && S?.adaptations?.length ? h('span', { class: 'badge', title: 'Suggested adjustments' }, S.adaptations.length) : null)));
+}
 function render() {
-  $('#nav').replaceChildren(h('div', { class: 'brand' }, 'Triathlon Coach'),
-    ...VIEWS.map(([id, label]) => h('button', { class: id === view ? 'on' : '', onclick: () => go(id) }, label)));
+  const g = groupOf(view);
+  if (g) lastSub[g] = view;
+  renderNav();
   const fn = { insights: vInsights, coach: vCoach, history: vHistory, today: vToday, plan: vPlan, season: vSeason, races: vRaces, availability: vAvailability, workouts: vWorkouts, strength: vStrength, profile: vProfile, connect: vConnect, method: vMethod }[view] || vToday;
-  $('#main').replaceChildren(...[fn()].flat());
+  delete savers[view];
+  const body = [fn()].flat(Infinity).filter((x) => x != null && x !== false);
+  $('#main').replaceChildren(...[
+    g && h('div', { class: 'subtabs' }, GROUPS[g].map(([id, label]) => h('button', { class: id === view ? 'on' : '', onclick: () => go(id) }, label))),
+    ...body,
+    savers[view] && h('div', { id: 'savebar', hidden: !dirty[view] }, h('span', {}, 'Unsaved changes'), btn('Discard', () => { discard(view); render(); }), btn('Save', savers[view], 'primary')),
+  ].filter(Boolean));
 }
 const page = (title, sub, ...actions) => h('header', { class: 'page' }, h('div', {}, h('h1', {}, title), sub && h('div', { class: 'sub' }, sub)), h('div', { class: 'row right' }, actions));
 const card = (title, ...kids) => h('div', { class: 'card' }, title && h('h2', {}, title), kids);
 const field = (label, input) => h('label', { class: 'f' }, label, input);
-const btn = (label, onclick, cls = '') => h('button', { class: `btn ${cls}`, onclick }, label);
+// Buttons whose handler returns a promise disable themselves and show progress until it settles.
+const btn = (label, onclick, cls = '') => h('button', { class: `btn ${cls}`, onclick: (e) => {
+  const el = e.currentTarget, r = onclick(e);
+  if (r && typeof r.then === 'function') { el.disabled = true; el.classList.add('busy'); r.finally(() => { el.disabled = false; el.classList.remove('busy'); }); }
+} }, label);
+// A small "More" menu for secondary actions.
+const menu = (label, items) => h('details', { class: 'menu' }, h('summary', { class: 'btn' }, label),
+  h('div', { class: 'menu-items' }, items.filter(Boolean).map(([text, run, cls]) => h('button', { class: cls || '', onclick: (e) => { e.currentTarget.closest('details').open = false; run(); } }, text))));
+const fmtWhen = (iso) => (iso ? `${fmtDate(iso.slice(0, 10))} ${new Date(iso).toTimeString().slice(0, 5)}` : 'never');
+// Plain-text coach output with "- " lists and **bold**, rendered as DOM nodes (never as HTML).
+function rich(text) {
+  const out = [], inline = (t) => t.split(/(\*\*[^*]+\*\*)/).map((p) => (p.startsWith('**') && p.endsWith('**') && p.length > 4 ? h('b', {}, p.slice(2, -2)) : p));
+  let list = null;
+  for (const line of String(text).split('\n')) {
+    const m = line.match(/^\s*[-•]\s+(.*)$/);
+    if (m) { if (!list) out.push((list = h('ul', { class: 'clean' }))); list.append(h('li', {}, inline(m[1]))); continue; }
+    list = null;
+    if (line.trim()) out.push(h('p', {}, inline(line.replace(/^#+\s*/, ''))));
+  }
+  return out;
+}
 
 // ---------------- workout rendering ----------------
 function profileBar(w) {
@@ -138,9 +198,9 @@ function adaptCards() {
   if (!list.length) return null;
   const any = list.some((a) => a.actionable);
   return h('div', { class: 'card adapt' },
-    h('div', { class: 'row' }, h('h2', { style: 'margin:0' }, 'Suggested adjustments'), h('span', { class: 'muted small' }, 'from what you have actually done this week'),
-      any && h('button', { class: 'btn primary right', onclick: () => act(() => api('POST', '/api/adapt/apply', {}), (r) => r.changes.join(' ') || 'Noted') }, list.length > 1 ? 'Apply all' : 'Apply')),
-    list.map((a) => h('div', { class: 'signal' }, h('span', { class: `pill ${a.kind === 'missed' && !a.actionable ? '' : 'warn'}` }, { bigday: 'Big day', overload: 'Load', missed: 'Missed' }[a.kind]),
+    h('div', { class: 'row' }, h('h2', { style: 'margin:0' }, 'Suggested adjustments'), h('span', { class: 'muted small' }, 'from what you have done and logged this week'),
+      any && h('span', { class: 'right' }, btn(list.length > 1 ? 'Apply all' : 'Apply', () => act(() => api('POST', '/api/adapt/apply', {}), (r) => r.changes.join(' ') || 'Noted'), 'primary'))),
+    list.map((a) => h('div', { class: 'signal' }, h('span', { class: `pill ${a.kind === 'missed' && !a.actionable ? '' : 'warn'}` }, { bigday: 'Big day', overload: 'Load', missed: 'Missed', niggle: 'Niggle' }[a.kind]),
       h('div', { style: 'flex:1' }, h('b', {}, a.title), h('div', { class: 'small' }, a.detail), a.actions.length ? h('ul', { class: 'clean small', style: 'margin-top:4px' }, a.actions.map((t) => h('li', {}, t))) : null),
       h('button', { class: 'btn sm', onclick: () => act(() => api('POST', '/api/adapt/dismiss', { key: a.key }), 'Left as planned') }, a.actionable ? 'Keep as planned' : 'OK'))));
 }
@@ -200,6 +260,10 @@ function sessionDialog(x) {
       btn('Delete', () => act(() => api('DELETE', `/api/sessions/${x.id}`), 'Deleted').then(close), 'danger'),
       x.sport !== 'race' && btn('Ask the coach', () => { close(); askCoach(`What is the purpose of “${x.workout.name}” on ${fmtDate(x.date)}, why is it placed there, and how should I execute it?`); })),
     h('div', { class: 'row', style: 'margin-top:10px' }, field('Move to', date), btn('Move', () => patch({ date: date.value }, 'Moved and pinned'))),
+    x.status === 'planned' && x.date >= S.today && x.sport !== 'race' && x.sport !== 'strength' && h('div', { class: 'row', style: 'margin-top:10px' }, h('span', { class: 'muted small' }, 'Quick edit'),
+      !x.workout.hard && btn('−15 min', () => patch({ minutes: x.workout.durationMin - 15 }, 'Shortened and pinned'), 'sm'),
+      !x.workout.hard && btn('+15 min', () => patch({ minutes: x.workout.durationMin + 15 }, 'Lengthened and pinned'), 'sm'),
+      x.workout.hard && btn('Make it easy', () => patch({ easy: true }, 'Replaced with an easy session'), 'sm')),
   ]);
 }
 
@@ -208,19 +272,23 @@ function vToday() {
   const t = S.today;
   const todays = S.sessions.filter((x) => x.date === t);
   const wk = S.season?.weeks[0];
-  const out = [page(`Today · ${fmtDate(t, true)}`, wk ? `${PHASE[wk.phase]} phase${wk.recovery ? ' · recovery week' : ''} — ${wk.focus}` : 'No plan yet')];
+  const out = [page(`Today · ${fmtDate(t, true)}`, wk ? `${PHASE[wk.phase]} phase${wk.recovery ? ' · recovery week' : ''}` : 'No plan yet')];
   if (!S.season) {
-    out.push(card('Get started',
-      h('ol', { class: 'clean' },
-        h('li', {}, h('a', { href: '#connect' }, 'Connect Intervals.icu'), ' to pull your thresholds, fitness and HRV (optional but recommended).'),
-        h('li', {}, 'Check your ', h('a', { href: '#profile' }, 'profile & thresholds'), ' — including how long you were off.'),
-        h('li', {}, 'Set your weekly ', h('a', { href: '#availability' }, 'availability'), ' and add your ', h('a', { href: '#races' }, 'races'), '.'),
-        h('li', {}, 'Generate the plan.')),
-      h('div', { style: 'margin-top:12px' }, btn('Generate my plan', () => act(() => api('POST', '/api/plan/generate', {}), 'Plan generated'), 'primary'))));
+    const steps = [
+      [S.intervals.connected, 'Connect Intervals.icu', 'pulls thresholds, history, fitness and HRV (optional, recommended)', 'connect'],
+      [!S.needs.length, 'Check your thresholds', S.needs.length ? `missing: ${S.needs.join(', ')}` : 'FTP, run threshold and CSS are set', 'profile'],
+      [!!S.profile.name || S.profile.comeback.resumedOn, 'Tell it about you', 'weekly hours you can train and how long you were off', 'profile'],
+      [true, 'Shape your week', 'see the optimal week, then fix days or cap them if you need to', 'availability'],
+      [S.races.some((r) => r.date >= t), 'Add your races', 'A-races drive the whole season; past races calibrate predictions', 'races'],
+    ];
+    out.push(card('Set up in five steps',
+      steps.map(([ok, title, sub, to], i) => h('div', { class: 'signal' }, h('span', { class: `pill ${ok ? 'good' : ''}` }, ok ? '✓' : String(i + 1)),
+        h('div', { style: 'flex:1' }, h('b', {}, title), h('div', { class: 'muted small' }, sub)), h('button', { class: 'btn sm', onclick: () => go(to) }, ok ? 'Review' : 'Open'))),
+      h('div', { style: 'margin-top:14px' }, btn('Generate my plan', () => act(() => api('POST', '/api/plan/generate', {}), 'Plan generated'), 'primary'),
+        h('span', { class: 'muted small', style: 'margin-left:10px' }, 'You can generate now and refine afterwards; every change re-plans.'))));
   }
-  if (S.needs.length) out.push(h('div', { class: 'notice' }, `Missing thresholds: ${S.needs.join(', ')}. Targets show as % until set — `, h('a', { href: '#profile' }, 'add them'), ' or sync from Intervals.icu.'));
+  if (S.season && S.needs.length) out.push(h('div', { class: 'notice' }, `Missing thresholds: ${S.needs.join(', ')}. Targets show as % until set — `, h('a', { href: '#profile' }, 'add them'), ' or sync from Intervals.icu.'));
   if (S.intervals.lastError) out.push(h('div', { class: 'notice bad' }, `Intervals.icu: ${S.intervals.lastError}`));
-  out.push(adaptCards());
 
   const r = S.readiness;
   const cls = { go: 'good', adjust: 'warn', recover: 'bad', unknown: '' }[r.status];
@@ -239,63 +307,79 @@ function vToday() {
         h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: !!ci.symptoms, onchange: (e) => (ci.symptoms = e.target.checked) }), 'Illness symptoms')),
       h('div', { style: 'margin-top:10px' }, btn('Save check-in', () => act(() => api('POST', '/api/checkin', ci), 'Check-in saved').then(() => delete draft.checkin)))));
 
+  const extrasToday = S.extras.filter((a) => a.date === t);
   const sessions = card('Today’s training',
-    todays.length ? todays.map((x) => h('div', { class: x.sport, style: 'border-left:4px solid var(--c);padding-left:12px;margin-bottom:16px' },
+    todays.map((x) => h('div', { class: x.sport, style: 'border-left:4px solid var(--c);padding-left:12px;margin-bottom:16px' },
       h('div', { class: 'row' }, h('h3', { style: 'margin:0' }, x.workout.name), h('span', { class: 'pill' }, meta(x.workout)), x.status !== 'planned' && h('span', { class: `pill ${x.status === 'done' ? 'good' : ''}` }, x.status),
         h('button', { class: 'btn sm right', onclick: () => sessionDialog(x) }, 'Options')),
       x.adaptedNote && h('div', { class: 'muted small' }, x.adaptedNote),
       x.actual && h('div', { class: 'notice good', style: 'margin-top:6px' }, h('b', {}, 'Did: '), `${x.actual.name || 'activity'} — ${actualLine(x.actual)}${verdict(x) ? ` (${verdict(x)})` : ''}`),
-      workoutDetail(x.workout)))
-      : !S.extras.some((a) => a.date === t) && h('p', { class: 'muted' }, S.season ? 'Rest day. Sleep, eat, and leave it alone — this is where the adaptation happens.' : 'Nothing planned.'),
-    S.extras.filter((a) => a.date === t).map(extraCard));
+      workoutDetail(x.workout))),
+    !todays.length && !extrasToday.length && h('p', { class: 'muted' }, S.season ? 'Rest day. Sleep, eat, and leave it alone — this is where the adaptation happens.' : 'Nothing planned.'),
+    extrasToday.map(extraCard));
+  // What is coming next, so a rest day or a finished day still shows something useful.
+  const nextDay = S.sessions.filter((x) => x.date > t && x.status === 'planned').map((x) => x.date)[0];
+  const upcoming = nextDay && (!todays.some((x) => x.status === 'planned')) ? card(nextDay === addDays(t, 1) ? 'Tomorrow' : `Next: ${fmtDate(nextDay)}`, S.sessions.filter((x) => x.date === nextDay).map(sessCard)) : null;
 
-  const ws = S.weekStats[0];
-  const side = [readiness, niggleCard(), debriefCard()];
-  if (ws) side.push(card('This week',
+  const ws = S.weekStats[S.currentWeek];
+  const week = ws && !ws.past ? card('This week',
     h('div', { class: 'grid g2' },
       h('div', {}, h('div', { class: 'label' }, 'Load'), h('div', { class: 'stat num' }, `${ws.doneTss} / ${ws.plannedTss}`), h('div', { class: 'muted small' }, 'TSS done / planned')),
       h('div', {}, h('div', { class: 'label' }, 'Time'), h('div', { class: 'stat num' }, `${hm(ws.doneMin)} / ${hm(ws.plannedMin)}`), h('div', { class: 'muted small' }, `Key sessions ${ws.keyDone}/${ws.keyTotal}`))),
-    S.ctl != null && h('p', { class: 'muted small', style: 'margin-top:10px' }, `Fitness (CTL) ${S.ctl.toFixed(0)}${S.monotony ? ` · monotony ${S.monotony.monotony}${S.monotony.monotony > 2 ? ' (high: vary your days more)' : ''}` : ''}`)));
-  if (S.nextRace) side.push(card('Next race', h('div', { class: 'stat' }, `${S.nextRace.days} days`), h('div', {}, `${S.nextRace.name} · ${RACE_TYPES[S.nextRace.type]} · priority ${S.nextRace.priority}`), h('div', { class: 'muted small' }, fmtDate(S.nextRace.date, true))));
-  out.push(h('div', { class: 'grid g2' }, h('div', {}, sessions), h('div', {}, side)));
+    h('p', { class: 'muted small', style: 'margin-top:10px' }, wk.focus),
+    S.ctl != null && h('p', { class: 'muted small' }, `Fitness (CTL) ${S.ctl.toFixed(0)}${S.monotony ? ` · monotony ${S.monotony.monotony}${S.monotony.monotony > 2 ? ' (high: vary your days more)' : ''}` : ''}`)) : null;
+  const race = S.nextRace ? card('Next race', h('div', { class: 'stat' }, `${S.nextRace.days} days`), h('div', {}, `${S.nextRace.name} · ${RACE_TYPES[S.nextRace.type]} · priority ${S.nextRace.priority}`), h('div', { class: 'muted small' }, fmtDate(S.nextRace.date, true))) : null;
+  out.push(h('div', { class: 'grid g2' }, h('div', {}, adaptCards(), sessions, upcoming, week), h('div', {}, readiness, niggleCard(), debriefCard(), race)));
   return out;
 }
 
 // ---------------- Plan ----------------
+// ---------------- Plan ----------------
 function vPlan() {
   if (!S.season) return [page('Plan'), card(null, h('p', {}, 'No plan yet.'), btn('Generate my plan', () => act(() => api('POST', '/api/plan/generate', {}), 'Plan generated'), 'primary'))];
-  const weeks = S.season.weeks.slice(0, S.weekStats.length);
-  planWeek = Math.min(planWeek, weeks.length - 1);
-  const wk = weeks[planWeek], ws = S.weekStats[planWeek];
-  const pushDays = h('select', {}, [7, 14, 21, 28].map((d) => h('option', { value: d, selected: d === 14 }, `${d} days`)));
-  const out = [page('Training plan', `${PHASE[wk.phase]}${wk.recovery ? ' · recovery week' : ''}${wk.testWeek ? ' · testing' : ''} — target ${wk.targetHours} h / ${wk.targetTss} TSS`,
-    btn('Add workout', () => addDialog(wk.start)),
-    btn('Re-plan', () => act(() => api('POST', '/api/plan/generate', {}), 'Future weeks re-planned')),
-    btn('Rebuild this week', () => confirm('Rebuild the rest of the current week from today? Pinned and completed sessions are kept.') && act(() => api('POST', '/api/plan/generate', { scope: 'week' }), 'Week rebuilt')),
-    S.intervals.connected && h('span', { class: 'row' }, pushDays, btn('Push to Intervals.icu', () => act(() => api('POST', '/api/intervals/push', { days: +pushDays.value }), (r) => `Pushed ${r.pushed} workouts${r.removed ? `, removed ${r.removed} stale` : ''}`), 'primary')))];
-  out.push(h('div', { class: 'row', style: 'margin-bottom:12px' }, weeks.map((w, i) => h('button', { class: `btn ${i === planWeek ? 'primary' : ''}`, onclick: () => { planWeek = i; render(); } }, i === 0 ? 'This week' : `${+w.start.slice(8)} ${MONTHS[+w.start.slice(5, 7) - 1]}`, ' ', h('span', { class: 'small' }, `· ${PHASE[w.phase]}${w.recovery ? ' (R)' : ''}`)))));
-  if (planWeek === 0) out.push(adaptCards());
-  for (const w of S.weekWarnings[wk.start] || []) out.push(h('div', { class: 'notice' }, w));
+  const weeks = S.weekStats;
+  if (planWeek == null || planWeek >= weeks.length) planWeek = S.currentWeek;
+  const wk = weeks[planWeek], current = planWeek === S.currentWeek;
+  const u = S.unsynced, pending = u ? u.changed + u.removed : 0;
+  const push = () => act(() => api('POST', '/api/intervals/push', { days: 14 }), (r) => `Pushed ${r.pushed} workouts${r.removed ? `, removed ${r.removed} stale` : ''}`);
+  const label = (w, i) => (i === S.currentWeek ? 'This week' : `${+w.start.slice(8)} ${MONTHS[+w.start.slice(5, 7) - 1]}`);
+  const out = [page('Training plan',
+    wk.past ? `Week of ${fmtDate(wk.start, true)} — review` : `${PHASE[wk.phase]}${wk.recovery ? ' · recovery week' : ''}${wk.testWeek ? ' · testing' : ''} — target ${wk.targetHours} h / ${wk.targetTss} TSS`,
+    S.intervals.connected && btn(pending && !u.never ? `Push ${pending} change${pending === 1 ? '' : 's'}` : 'Push to devices', push, pending ? 'primary' : ''),
+    menu('More', [
+      ['Add a workout', () => addDialog(wk.start < S.today ? S.today : wk.start)],
+      ['Re-plan future weeks', () => act(() => api('POST', '/api/plan/generate', {}), 'Future weeks re-planned')],
+      ['Re-plan from today', () => confirm('Re-plan the rest of this week from today? Pinned and completed sessions are kept.') && act(() => api('POST', '/api/plan/generate', { scope: 'week' }), 'Rest of the week re-planned')],
+      S.undo && [`Undo: ${S.undo.label}`, doUndo],
+      ['Download calendar (.ics)', () => (location.href = '/api/plan.ics')],
+    ]))];
+  out.push(h('div', { class: 'tabs' },
+    weeks.map((w, i) => h('button', { class: `btn ${i === planWeek ? 'primary' : ''} ${w.past ? 'pastweek' : ''}`, onclick: () => { planWeek = i; render(); } }, label(w, i),
+      h('span', { class: 'small' }, w.past ? ' · done' : ` · ${PHASE[w.phase]}${w.recovery ? ' (R)' : ''}`)))));
+  if (u && pending && !wk.past) out.push(h('div', { class: 'notice' }, u.never ? 'This plan has not been sent to Intervals.icu yet, so your devices do not have it.'
+    : `${pending} session${pending === 1 ? '' : 's'} in the next two weeks ${pending === 1 ? 'differs' : 'differ'} from what is on your devices${u.removed ? ` (${u.removed} removed here)` : ''}. Push to update them.`));
   out.push(h('div', { class: 'week' }, DAYS.map((d, i) => {
     const date = addDays(wk.start, i);
-    const list = S.sessions.filter((x) => x.date === date);
+    const list = S.sessions.filter((x) => x.date === date), extras = S.extras.filter((a) => a.date === date);
     const ov = S.availability.overrides[date];
     const cap = ov ? ov.minutes : S.availability.days[i].minutes;
     return h('div', { class: `day ${date === S.today ? 'today' : ''} ${date < S.today ? 'past' : ''}` },
-      h('div', { class: 'dh' }, h('b', {}, `${d} ${+date.slice(8)}`), h('span', {}, ov ? `${ov.note || 'override'} · ${hm(cap)}` : hm(cap))),
-      list.map(sessCard), S.extras.filter((a) => a.date === date).map(extraCard),
-      !list.length && !S.extras.some((a) => a.date === date) && h('div', { class: 'muted small' }, cap < 30 ? 'Unavailable' : 'Rest'));
+      h('div', { class: 'dh' }, h('b', {}, `${d} ${+date.slice(8)}`), h('span', {}, ov ? `${ov.note || 'exception'} · ${hm(cap)}` : cap != null ? `max ${hm(cap)}` : '')),
+      list.map(sessCard), extras.map(extraCard),
+      !list.length && !extras.length && h('div', { class: 'muted small' }, cap != null && cap < 30 ? 'Unavailable' : 'Rest'));
   })));
-  const sports = Object.entries(ws.bySport).sort((a, b) => b[1] - a[1]);
+  if (current) out.push(adaptCards());
+  for (const w of S.weekWarnings[wk.start] || []) out.push(h('div', { class: 'notice' }, w, ' ', h('a', { href: '#availability' }, 'Availability')));
+  const sports = Object.entries(wk.bySport).sort((a, b) => b[1] - a[1]);
   out.push(h('div', { class: 'grid g3', style: 'margin-top:14px' },
-    card('Planned', h('div', { class: 'stat num' }, `${hm(ws.plannedMin)} · ${ws.plannedTss} TSS`), h('div', { class: 'muted small' }, `Target ${wk.targetHours} h · ${wk.targetTss} TSS`)),
-    card('Completed', h('div', { class: 'stat num' }, `${hm(ws.doneMin)} · ${ws.doneTss} TSS`), h('div', { class: 'muted small' }, `Key sessions ${ws.keyDone}/${ws.keyTotal}`)),
+    card('Planned', h('div', { class: 'stat num' }, `${hm(wk.plannedMin)} · ${wk.plannedTss} TSS`), wk.targetTss != null && h('div', { class: 'muted small' }, `Target ${wk.targetHours} h · ${wk.targetTss} TSS`)),
+    card('Completed', h('div', { class: 'stat num' }, `${hm(wk.doneMin)} · ${wk.doneTss} TSS`), h('div', { class: 'muted small' }, `Key sessions ${wk.keyDone}/${wk.keyTotal}`)),
     card('By discipline', sports.map(([sp, min]) => h('div', { class: `row ${sp}` }, h('span', { class: 'dot', style: 'background:var(--c)' }), h('span', {}, SPORT[sp]), h('span', { class: 'right num' }, hm(min)))))));
-  out.push(h('p', { class: 'muted small' }, wk.focus));
+  if (wk.focus) out.push(h('p', { class: 'muted small' }, wk.focus));
   return out;
 }
 function addDialog(weekStart) {
-  const date = h('input', { type: 'date', value: weekStart < S.today ? S.today : weekStart });
+  const date = h('input', { type: 'date', value: weekStart });
   const pick = h('select', {}, S.library.map((l) => h('option', { value: l.id }, `${SPORT[l.workout.sport]} · ${l.workout.name} (${meta(l.workout)})`)));
   openDialog('', 'Add workout', S.library.length ? [
     h('div', { class: 'form' }, field('Date', date), field('Workout from your library', pick)),
@@ -344,63 +428,118 @@ function vRaces() {
   const goals = draft.goals ??= structuredClone(S.goals);
   const inp = (obj, key, attrs = {}) => h('input', { value: obj[key] ?? '', oninput: (e) => (obj[key] = e.target.value), ...attrs });
   const sel = (obj, key, opts) => h('select', { onchange: (e) => (obj[key] = e.target.value) }, Object.entries(opts).map(([v, l]) => h('option', { value: v, selected: obj[key] === v }, l)));
-  const del = (list, i) => h('button', { class: 'btn sm danger', onclick: () => { list.splice(i, 1); render(); } }, '✕');
+  const remove = (list, i) => h('button', { class: 'btn sm danger', onclick: () => { list.splice(i, 1); setDirty('races'); render(); } }, 'Remove');
+  savers.races = () => act(async () => {
+    await api('PUT', '/api/races', races);
+    await api('PUT', '/api/goals', goals);
+    if (S.season) await api('POST', '/api/plan/generate', {});
+    discard('races');
+  }, S.season ? 'Saved. Future weeks re-planned.' : 'Saved.');
+  const saved = (r) => r.id && S.races.some((x) => x.id === r.id);
   return [
     page('Races & goals', 'A-races shape the whole season. B-races get a short freshen-up. C-races are trained through. Add past races too: their results calibrate your predictions.'),
-    card('Race calendar',
-      h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['Race', 'Date', 'Type', 'Priority', 'Goal', 'Course', ''].map((c) => h('th', {}, c)))),
-        h('tbody', {}, races.map((r, i) => h('tr', {}, h('td', {}, inp(r, 'name', { placeholder: 'Race name' })), h('td', {}, inp(r, 'date', { type: 'date' })), h('td', {}, sel(r, 'type', RACE_TYPES)),
-          h('td', {}, sel(r, 'priority', { A: 'A', B: 'B', C: 'C' })), h('td', {}, inp(r, 'goal', { placeholder: 'e.g. sub 4:30, AG podium' })),
-          h('td', {}, r.id && S.races.some((x) => x.id === r.id) ? h('span', { class: 'row', style: 'flex-wrap:nowrap' }, h('button', { class: 'btn sm', onclick: () => courseDialog(r.id) }, r.course || r.podium ? 'Course ✓' : 'Course & targets'),
-            r.date < S.today && h('button', { class: 'btn sm primary', onclick: () => resultDialog(r.id) }, 'Result')) : h('span', { class: 'muted small' }, 'save first')),
-          h('td', {}, del(races, i))))))),
-      h('div', { class: 'row', style: 'margin-top:10px' },
-        btn('Add race', () => { races.push({ name: '', date: addDays(S.today, 120), type: 'half', priority: 'A' }); render(); }),
-        btn('Save races', () => saveAndReplan('PUT', '/api/races', races, 'Races saved.').then(() => { delete draft.races; render(); }), 'primary'))),
-    card('Goals',
-      h('p', { class: 'muted small' }, 'Performance, health, skill and life goals in one place. Season goals should serve the long-term ones — review them at every recovery week.'),
-      h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['Goal', 'Area', 'Horizon', 'Measure / target', 'By', 'Status', ''].map((c) => h('th', {}, c)))),
-        h('tbody', {}, goals.map((g, i) => h('tr', {}, h('td', {}, inp(g, 'title', { placeholder: 'e.g. Top-3 age group at 70.3', style: 'min-width:220px' })),
-          h('td', {}, sel(g, 'category', { performance: 'Performance', health: 'Health', skill: 'Skill', life: 'Life balance' })), h('td', {}, sel(g, 'horizon', { season: 'This season', 'long-term': 'Long term' })),
-          h('td', {}, inp(g, 'target', { placeholder: 'e.g. FTP 4.3 W/kg' })), h('td', {}, inp(g, 'due', { type: 'date' })), h('td', {}, sel(g, 'status', { active: 'Active', achieved: 'Achieved', parked: 'Parked' })), h('td', {}, del(goals, i))))))),
-      h('div', { class: 'row', style: 'margin-top:10px' },
-        btn('Add goal', () => { goals.push({ title: '', category: 'performance', horizon: 'season', status: 'active' }); render(); }),
-        btn('Save goals', () => act(() => api('PUT', '/api/goals', goals), 'Goals saved').then(() => delete draft.goals), 'primary'))),
+    h('h2', {}, 'Races'),
+    races.length ? races.map((r, i) => h('div', { class: `card item ${r.date < S.today ? 'pastitem' : ''}` },
+      h('div', { class: 'form' }, field('Race', inp(r, 'name', { placeholder: 'Race name' })), field('Date', inp(r, 'date', { type: 'date' })), field('Type', sel(r, 'type', RACE_TYPES)),
+        field('Priority', sel(r, 'priority', { A: 'A — peak for it', B: 'B — freshen up', C: 'C — train through' })), field('Goal', inp(r, 'goal', { placeholder: 'e.g. sub 4:30, AG podium' }))),
+      h('div', { class: 'row', style: 'margin-top:10px' }, r.date < S.today && h('span', { class: 'pill' }, 'Past race'),
+        saved(r) ? [h('button', { class: 'btn sm', onclick: () => courseDialog(r.id) }, r.course || r.podium ? 'Course & targets ✓' : 'Course & targets'),
+          r.date < S.today && h('button', { class: 'btn sm primary', onclick: () => resultDialog(r.id) }, 'Result & analysis')] : h('span', { class: 'muted small' }, 'Save to add the course, targets or result.'),
+        h('span', { class: 'right' }, remove(races, i))))) : h('p', { class: 'muted' }, 'No races yet.'),
+    h('div', { class: 'row', style: 'margin-bottom:22px' }, btn('Add a race', () => { races.push({ name: '', date: addDays(S.today, 120), type: 'half', priority: 'A' }); setDirty('races'); render(); })),
+    h('h2', {}, 'Goals'),
+    h('p', { class: 'muted small' }, 'Performance, health, skill and life goals in one place. Season goals should serve the long-term ones — review them at every recovery week.'),
+    goals.map((g, i) => h('div', { class: 'card item' },
+      h('div', { class: 'form' }, field('Goal', inp(g, 'title', { placeholder: 'e.g. Top-3 age group at 70.3' })), field('Area', sel(g, 'category', { performance: 'Performance', health: 'Health', skill: 'Skill', life: 'Life balance' })),
+        field('Horizon', sel(g, 'horizon', { season: 'This season', 'long-term': 'Long term' })), field('Measure / target', inp(g, 'target', { placeholder: 'e.g. FTP 4.3 W/kg' })), field('By', inp(g, 'due', { type: 'date' })),
+        field('Status', sel(g, 'status', { active: 'Active', achieved: 'Achieved', parked: 'Parked' }))),
+      h('div', { class: 'row', style: 'margin-top:8px' }, h('span', { class: 'right' }, remove(goals, i))))),
+    h('div', { class: 'row' }, btn('Add a goal', () => { goals.push({ title: '', category: 'performance', horizon: 'season', status: 'active' }); setDirty('races'); render(); })),
   ];
 }
 
 // ---------------- Availability ----------------
+// ---------------- Availability ----------------
+// The plan lays out its best week first; limits and fixed days are constraints added on top.
+let previewTimer = null;
+function refreshPreview(now) {
+  const run = async () => {
+    const a = draft.availability, pv = draft.preview;
+    if (!a || !pv) return;
+    pv.loading = true;
+    try { pv.data = await api('POST', '/api/availability/preview', { availability: a, week: pv.which }); pv.error = null; }
+    catch (e) { pv.error = e.message; }
+    pv.loading = false;
+    if (view === 'availability') render();
+  };
+  clearTimeout(previewTimer);
+  if (now) run(); else previewTimer = setTimeout(run, 250);
+}
 function vAvailability() {
   const a = draft.availability ??= structuredClone(S.availability);
+  a.fixed ??= {};
   const ov = draft.overrides ??= Object.entries(a.overrides).map(([date, v]) => ({ date, ...v })).sort((x, y) => x.date.localeCompare(y.date));
-  const total = h('b', { class: 'num' });
-  const upd = () => (total.textContent = `${hm(a.days.reduce((t, d) => t + (+d.minutes || 0), 0))} h available per week (plan uses up to ${S.profile.maxWeeklyHours} h)`);
-  upd();
-  const save = () => {
+  const pv = draft.preview ??= { which: 'next', data: null, loading: false };
+  if (!pv.data && !pv.loading && !pv.error) refreshPreview(true);
+  const changed = () => { setDirty('availability'); refreshPreview(); };
+  savers.availability = () => {
     a.overrides = Object.fromEntries(ov.filter((o) => o.date).map((o) => [o.date, { minutes: +o.minutes || 0, note: o.note }]));
-    return saveAndReplan('PUT', '/api/availability', a, 'Availability saved.').then(() => { delete draft.availability; delete draft.overrides; });
+    return saveAndReplan('PUT', '/api/availability', a, 'Availability saved.').then(() => { discard('availability'); render(); });
   };
+  const d = pv.data, limited = a.days.some((x) => x.minutes != null);
+  const LIMITS = [['', 'No limit'], [0, 'Unavailable'], [30, '0:30'], [45, '0:45'], [60, '1:00'], [75, '1:15'], [90, '1:30'], [120, '2:00'], [150, '2:30'], [180, '3:00'], [240, '4:00'], [300, '5:00']];
+  const chips = (label, hint, get, set, multi) => h('div', { class: 'fixrow' }, h('div', {}, h('b', {}, label), h('div', { class: 'muted small' }, hint)),
+    h('div', { class: 'chips' }, DAYS.map((name, i) => { const on = multi ? (get() || []).includes(i) : get() === i;
+      return h('button', { class: `chip ${on ? 'on' : ''}`, 'aria-pressed': on, onclick: () => {
+        if (multi) { const cur = new Set(get() || []); cur.has(i) ? cur.delete(i) : cur.add(i); set([...cur].sort()); } else set(on ? undefined : i);
+        changed(); render();
+      } }, name); })));
+  const fx = a.fixed;
+  const delta = d && d.limited ? d.minutes - d.optimal.minutes : 0;
   return [
-    page('Availability', 'Tell the plan when you can train. It decides what goes where.'),
-    card('Typical week',
-      h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['Day', 'Time available (min)', 'Pool access', 'Gym access'].map((c) => h('th', {}, c)))),
-        h('tbody', {}, a.days.map((d, i) => h('tr', {}, h('td', {}, h('b', {}, DAYS[i])),
-          h('td', {}, h('input', { type: 'number', min: 0, max: 600, step: 15, value: d.minutes, oninput: (e) => { d.minutes = +e.target.value || 0; upd(); } })),
-          h('td', {}, h('input', { type: 'checkbox', checked: d.pool, onchange: (e) => (d.pool = e.target.checked) })),
-          h('td', {}, h('input', { type: 'checkbox', checked: d.gym, onchange: (e) => (d.gym = e.target.checked) }))))))),
-      h('p', { style: 'margin-top:10px' }, total),
-      h('p', { class: 'muted small' }, 'Long ride and long run go to your biggest days. Set a day to 0 to keep it free. Days with 4+ hours can take three sessions.')),
+    page('Availability', 'This is the week the plan would give you with nothing in the way. Fix the days that are fixed, cap the days that are short, and see what it costs.'),
+    h('div', { class: 'card' },
+      h('div', { class: 'row' }, h('h2', { style: 'margin:0' }, limited ? 'Your week with your limits' : 'Your optimal week'),
+        h('div', { class: 'row right', 'data-nodraft': '' }, [['next', 'A typical week now'], ['peak', 'The biggest week of the season']].map(([k, l]) =>
+          h('button', { class: `btn sm ${pv.which === k ? 'primary' : ''}`, onclick: () => { pv.which = k; pv.data = null; render(); } }, l)))),
+      !d ? h('p', { class: 'muted', style: 'margin-top:10px' }, pv.error || 'Working out your week…') : [
+        h('p', { style: 'margin:10px 0' }, h('b', { class: 'num' }, `${hm(d.minutes)} · ${d.tss} TSS`), ` in ${d.sessions} sessions — ${PHASE[d.week.phase].toLowerCase()} week, target ${d.week.targetTss} TSS. `,
+          d.limited ? (Math.abs(delta) < 10 && d.sessions === d.optimal.sessions ? h('span', { class: 'pill good' }, 'Your limits cost nothing')
+            : h('span', { class: `pill ${delta < -45 || d.sessions < d.optimal.sessions ? 'warn' : ''}` }, `${delta <= 0 ? '−' : '+'}${hm(Math.abs(delta))} and ${d.optimal.sessions - d.sessions > 0 ? `${d.optimal.sessions - d.sessions} fewer session${d.optimal.sessions - d.sessions === 1 ? '' : 's'}` : 'the same sessions'} versus the optimal ${hm(d.optimal.minutes)}`))
+            : h('span', { class: 'pill good' }, 'Nothing is constraining it')),
+        h('div', { class: `week ${pv.loading ? 'loading' : ''}` }, d.days.map((day, i) => h('div', { class: 'day' },
+          h('div', { class: 'dh' }, h('b', {}, DAYS[i]), h('span', { class: 'num' }, day.minutes ? hm(day.minutes) : '')),
+          day.sessions.length ? day.sessions.map((x) => h('div', { class: `sess static ${x.sport}` }, h('div', { class: 't' }, x.name), h('div', { class: 'm' }, `${SPORT[x.sport]} · ${hm(x.minutes)}${x.hard ? ' · hard' : ''}`)))
+            : h('div', { class: 'muted small' }, fx.rest === i ? 'Rest (fixed)' : a.days[i].minutes === 0 ? 'Unavailable' : 'Rest'),
+          d.limited && d.optimal.days[i] - day.minutes >= 10 && h('div', { class: 'small lost' }, `optimal ${hm(d.optimal.days[i])}`),
+          h('div', { class: 'daylimit' }, h('select', { 'aria-label': `${DAYS[i]} time limit`, onchange: (e) => { a.days[i].minutes = e.target.value === '' ? null : +e.target.value; changed(); } },
+            LIMITS.map(([v, l]) => h('option', { value: v, selected: (a.days[i].minutes ?? '') === v }, l)),
+            a.days[i].minutes != null && !LIMITS.some(([v]) => v === a.days[i].minutes) && h('option', { value: a.days[i].minutes, selected: true }, hm(a.days[i].minutes))),
+            h('div', { class: 'chips small' },
+              !fx.swim?.length && h('button', { class: `chip ${a.days[i].pool ? 'on' : ''}`, title: 'Pool available', onclick: () => { a.days[i].pool = !a.days[i].pool; changed(); render(); } }, 'Pool'),
+              !fx.strength?.length && h('button', { class: `chip ${a.days[i].gym ? 'on' : ''}`, title: 'Gym available', onclick: () => { a.days[i].gym = !a.days[i].gym; changed(); render(); } }, 'Gym')))))),
+        d.warnings.map((w) => h('div', { class: 'notice', style: 'margin-top:10px' }, w)),
+        h('p', { class: 'muted small', style: 'margin-top:10px' }, 'Set a limit under a day only where you have to. Each change re-flows the week here straight away; nothing is saved until you press Save.'),
+        limited && h('div', { 'data-nodraft': '' }, btn('Remove all limits', () => { for (const x of a.days) x.minutes = null; changed(); render(); }, 'sm')),
+      ]),
+    card('Fixed days',
+      h('p', { class: 'muted small' }, 'Tap the days that are not negotiable. Leave a row empty and the plan chooses.'),
+      chips('Swims', 'swim on exactly these days (squad, lane booking)', () => fx.swim, (v) => (fx.swim = v.length ? v : undefined), true),
+      chips('Strength', 'lift only on these days', () => fx.strength, (v) => (fx.strength = v.length ? v : undefined), true),
+      chips('Long ride', 'default: Saturday', () => fx.longRide, (v) => (fx.longRide = v)),
+      chips('Long run', 'default: Sunday', () => fx.longRun, (v) => (fx.longRun = v)),
+      chips('Rest day', S.profile.restDay ? 'default: Monday' : 'none protected unless you pick one', () => fx.rest, (v) => (fx.rest = v))),
     card('Exceptions (travel, work, family)',
-      ov.length ? h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['Date', 'Minutes', 'Note', ''].map((c) => h('th', {}, c)))),
-        h('tbody', {}, ov.map((o, i) => h('tr', {}, h('td', {}, h('input', { type: 'date', value: o.date, oninput: (e) => (o.date = e.target.value) })),
-          h('td', {}, h('input', { type: 'number', min: 0, max: 600, step: 15, value: o.minutes, oninput: (e) => (o.minutes = +e.target.value || 0) })),
-          h('td', {}, h('input', { value: o.note ?? '', placeholder: 'e.g. travel', oninput: (e) => (o.note = e.target.value) })),
-          h('td', {}, h('button', { class: 'btn sm danger', onclick: () => { ov.splice(i, 1); render(); } }, '✕'))))))) : h('p', { class: 'muted' }, 'No exceptions.'),
-      h('div', { class: 'row', style: 'margin-top:10px' }, btn('Add exception', () => { ov.push({ date: addDays(S.today, 7), minutes: 0, note: '' }); render(); }))),
-    h('div', { class: 'row' }, btn('Save availability', save, 'primary')),
+      ov.length ? ov.map((o, i) => h('div', { class: 'form', style: 'margin-bottom:8px;align-items:end' },
+        field('Date', h('input', { type: 'date', value: o.date, oninput: (e) => (o.date = e.target.value) })),
+        field('Time available (min)', h('input', { type: 'number', min: 0, max: 600, step: 15, value: o.minutes, oninput: (e) => (o.minutes = +e.target.value || 0) })),
+        field('Note', h('input', { value: o.note ?? '', placeholder: 'e.g. travel', oninput: (e) => (o.note = e.target.value) })),
+        h('div', {}, h('button', { class: 'btn sm danger', onclick: () => { ov.splice(i, 1); setDirty('availability'); render(); } }, 'Remove')))) : h('p', { class: 'muted' }, 'None. Add one for a specific date that differs from your normal week.'),
+      h('div', { class: 'row', style: 'margin-top:10px' }, btn('Add an exception', () => { ov.push({ date: addDays(S.today, 7), minutes: 0, note: '' }); setDirty('availability'); render(); }))),
   ];
 }
 
+// ---------------- Workouts ----------------
 // ---------------- Workouts ----------------
 const newStep = (sport) => ({ kind: 'work', unit: sport === 'swim' ? 'm' : 'min', amount: sport === 'swim' ? 100 : 5, lo: 95, hi: 100, cue: '' });
 function vWorkouts() {
@@ -446,10 +585,13 @@ function vWorkouts() {
 // ---------------- Strength ----------------
 function vStrength() {
   const next = S.sessions.find((x) => x.sport === 'strength' && x.date >= S.today && x.status === 'planned');
+  const isNow = (b) => !!next && next.workout.name.includes(b.title);
   return [
     page('Strength programme', 'Periodised with the season: adaptation → maximal strength → power → in-season maintenance.'),
     next && h('div', { class: 'notice info' }, `Next strength session: ${next.workout.name} on ${fmtDate(next.date)}.`),
-    ...S.strength.map((b) => card(b.title, h('p', {}, b.aim), h('p', { class: 'muted small' }, b.dosing),
+    ...S.strength.map((b) => h('details', { class: 'card fold', open: isNow(b) || (!next && b.block === 'adaptation') },
+      h('summary', {}, h('h2', { style: 'display:inline;margin:0' }, b.title), isNow(b) && h('span', { class: 'pill good', style: 'margin-left:10px' }, 'Current block'), h('div', { class: 'muted small', style: 'margin-top:4px' }, b.dosing)),
+      h('p', { style: 'margin-top:10px' }, b.aim),
       h('div', { class: 'grid g2' }, b.sessions.map((w) => h('div', {}, h('h3', {}, w.name.split(' · ')[0]),
         h('table', {}, h('tbody', {}, w.exercises.map((e) => h('tr', {}, h('td', {}, e.name, e.note && h('div', { class: 'muted small' }, e.note)), h('td', { class: 'num', style: 'white-space:nowrap' }, e.sets), h('td', { class: 'small' }, e.load)))))))))),
     card('Rules', h('ul', { class: 'clean' },
@@ -461,8 +603,10 @@ function vStrength() {
 }
 
 // ---------------- Profile ----------------
+// ---------------- Profile ----------------
 function vProfile() {
   const p = draft.profile ??= structuredClone(S.profile);
+  savers.profile = () => saveAndReplan('PUT', '/api/profile', p, 'Profile saved.').then(() => { discard('profile'); render(); });
   const num = (key, attrs = {}) => h('input', { type: 'number', value: p[key] ?? '', oninput: (e) => (p[key] = e.target.value === '' ? null : +e.target.value), ...attrs });
   const pace = (key, ph) => h('input', { value: clock(p[key]), placeholder: ph, onchange: (e) => (p[key] = parseClock(e.target.value)) });
   const sel = (obj, key, opts) => h('select', { onchange: (e) => (obj[key] = e.target.value) }, Object.entries(opts).map(([v, l]) => h('option', { value: v, selected: obj[key] === v }, l)));
@@ -496,7 +640,7 @@ function vProfile() {
       field('Resumed training on', h('input', { type: 'date', value: p.comeback.resumedOn ?? '', oninput: (e) => (p.comeback.resumedOn = e.target.value || null) })),
       field('Notes (private)', h('input', { value: p.comeback.note ?? '', oninput: (e) => (p.comeback.note = e.target.value) }))),
       h('p', { class: 'muted small', style: 'margin-top:10px' }, 'Sets the length of the rebuild block (2–6 weeks): aerobic volume and strength first, bike intensity from week 2, run intensity last. Weeks already served since you resumed are credited. Untick once you are through it.')),
-    h('div', { class: 'row', style: 'margin-bottom:14px' }, btn('Save profile', () => saveAndReplan('PUT', '/api/profile', p, 'Profile saved.').then(() => delete draft.profile), 'primary')),
+    h('div', { class: 'row', style: 'margin-bottom:14px' }, btn('Save profile', () => savers.profile(), 'primary')),
     card('Your zones', h('div', { class: 'grid g3' }, zt('Bike', S.zones.bike), zt('Run', S.zones.run), zt('Swim', S.zones.swim))),
   ];
 }
@@ -506,7 +650,7 @@ function vConnect() {
   const i = S.intervals;
   const key = h('input', { type: 'password', placeholder: 'API key', autocomplete: 'off', style: 'min-width:260px' });
   const id = h('input', { placeholder: 'Athlete ID, e.g. i123456 (optional)', value: i.athleteId ?? '' });
-  const when = (t) => (t ? new Date(t).toLocaleString() : 'never');
+  const when = fmtWhen;
   return [
     page('Connect', 'Intervals.icu is the hub: data comes in from it, planned workouts go out through it to your devices.'),
     card('Intervals.icu',
@@ -704,9 +848,9 @@ function debriefCard() {
   const d = S.debrief;
   const stale = !d || d.week !== S.season.weeks[0].start;
   return card('Weekly debrief',
-    d ? [h('div', { class: 'muted small' }, `Written ${new Date(d.at).toLocaleDateString()}${stale ? ' — for a previous week' : ''}`), h('div', { class: 'msg assistant', style: 'max-width:100%;margin-top:8px' }, d.text)]
+    d ? h('details', { open: !stale }, h('summary', { class: 'muted small' }, `Written ${fmtDate(d.at.slice(0, 10))}${stale ? ' — for a previous week' : ''}`), h('div', { class: 'msg assistant', style: 'max-width:100%;margin-top:8px' }, rich(d.text)))
       : h('p', { class: 'muted small' }, 'A written review of your last 7 days against the plan, with what to change next. Uses the coach.'),
-    h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { class: `btn ${stale ? 'primary' : ''}`, disabled: debriefing, onclick: runDebrief }, debriefing ? 'Writing…' : d ? 'Write a new one' : 'Write my debrief'),
+    h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { class: `btn ${stale ? 'primary' : ''} ${debriefing ? 'busy' : ''}`, disabled: debriefing, onclick: runDebrief }, debriefing ? 'Writing…' : d ? 'Write a new one' : 'Write my debrief'),
       d && btn('Discuss with coach', () => go('coach'))));
 }
 function vInsights() {
@@ -750,14 +894,36 @@ function askCoach(text) { coach.input = text; go('coach'); }
 async function sendCoach() {
   const text = coach.input.trim();
   if (!text || coach.pending) return;
-  coach.pending = text; coach.input = ''; coach.changes = [];
+  coach.pending = text; coach.input = ''; coach.changes = []; coach.partial = '';
   render();
+  const before = S.undo?.at;
   try {
-    const r = await api('POST', '/api/coach', { message: text });
-    coach.changes = r.changes;
-  } catch (e) { toast(e.message, true); coach.input = text; }
-  coach.pending = null;
+    // The reply arrives as server-sent events: text as it is written, then the outcome.
+    const res = await fetch('/api/coach/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text }) });
+    if (!res.ok || !res.body) throw new Error((await res.json().catch(() => ({}))).error || `Request failed (${res.status})`);
+    const reader = res.body.getReader(), dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 2);
+        if (!line.startsWith('data: ')) continue;
+        const ev = JSON.parse(line.slice(6));
+        if (ev.type === 'text') {
+          coach.partial += ev.text;
+          const el = $('#coach-live');
+          if (el) { el.classList.remove('muted'); el.replaceChildren(...rich(coach.partial)); el.parentElement.scrollTop = el.parentElement.scrollHeight; }
+        } else if (ev.type === 'done') coach.changes = ev.changes;
+        else if (ev.type === 'error') throw new Error(ev.error);
+      }
+    }
+  } catch (e) { toast(e.message, true); if (!coach.partial) coach.input = text; }
+  coach.pending = null; coach.partial = '';
   await load();
+  if (coach.changes.length && S.undo && S.undo.at !== before) toast('The coach changed your plan.', false, { label: 'Undo', run: doUndo });
 }
 function vCoach() {
   if (!S.coach.configured) return [page('Coach', 'Talk through your plan with Claude.'), card(null, h('p', {}, 'Add an Anthropic API key to switch the coach on.'), btn('Set up under Connect', () => go('connect'), 'primary'))];
@@ -767,9 +933,9 @@ function vCoach() {
   const ideas = ['Why is this week structured the way it is?', 'I only have 45 minutes tomorrow — adjust the session.', 'Make Saturday’s long ride harder; I feel good.',
     'Compare my last 8 weeks with my best block. Am I ramping too fast?', 'I’m travelling Thursday and Friday next week with no bike. Re-plan around it.'];
   const log = h('div', { class: 'chat' },
-    msgs.length ? msgs.map((m) => h('div', { class: `msg ${m.role}` }, m.text)) : h('div', { class: 'muted' }, 'The coach sees your profile, season, the next two weeks, recent training and today’s readiness, and can look up the rest. It can move, change, add or skip sessions when you ask.'),
-    coach.pending && h('div', { class: 'msg assistant muted' }, 'Thinking…'),
-    !coach.pending && coach.changes.length ? h('div', { class: 'notice good' }, h('b', {}, 'Plan changed: '), coach.changes.join(' '), ' ', h('a', { href: '#plan' }, 'View plan'), S.intervals.connected ? ' — push to Intervals.icu from there to update your devices.' : '') : null);
+    msgs.length ? msgs.map((m) => h('div', { class: `msg ${m.role}` }, m.role === 'assistant' ? rich(m.text) : m.text)) : h('div', { class: 'muted' }, 'The coach sees your profile, season, the next two weeks, recent training and today’s readiness, and can look up the rest. It can move, change, add or skip sessions when you ask.'),
+    coach.pending && h('div', { class: 'msg assistant muted', id: 'coach-live' }, 'Thinking…'),
+    !coach.pending && coach.changes.length ? h('div', { class: 'notice good' }, h('b', {}, 'Plan changed: '), coach.changes.join(' '), ' ', h('a', { href: '#plan' }, 'View plan'), S.intervals.connected ? ' — push from there to update your devices. ' : ' ', S.undo && h('button', { class: 'btn sm', onclick: doUndo }, 'Undo')) : null);
   setTimeout(() => { log.scrollTop = log.scrollHeight; if (!coach.pending) ta.focus(); });
   return [
     page('Coach', `Claude (${S.coach.model}) with access to your plan and history.`,

@@ -213,3 +213,63 @@ test('race course, target splits and niggles round-trip through the API', async 
   assert.equal((await api('GET', '/api/state')).data.niggles.length, 0);
   assert.ok('comeback' in data.insights && 'ramp' in data.insights);
 });
+
+test('undo, device sync state, quick edits, availability preview and duplicate races', async () => {
+  // fresh, connected, with a plan
+  await api('POST', '/api/intervals/connect', { apiKey: 'secret-key' });
+  await api('PUT', '/api/races', [{ name: 'Main 70.3', date: '2027-06-27', type: 'half', priority: 'A' }]);
+  const dup = await api('PUT', '/api/races', [{ name: 'Main 70.3', date: '2027-06-27', type: 'half', priority: 'A' }, { name: 'main 70.3', date: '2027-06-27', type: 'half', priority: 'B' }]);
+  assert.equal(dup.status, 400);
+  assert.match(dup.data.error, /listed twice/);
+  await api('POST', '/api/plan/generate', { scope: 'week' });
+  let { data } = await api('GET', '/api/state');
+  assert.equal(data.unsynced.never, true);
+  await api('POST', '/api/intervals/push', { days: 14 });
+  data = (await api('GET', '/api/state')).data;
+  assert.deepEqual(data.unsynced, { changed: 0, removed: 0, never: false });
+
+  // quick edit an easy session: +15 min, pinned, flagged as not on the device, and undoable
+  const easy = data.sessions.find((x: any) => x.date > TODAY && x.status === 'planned' && ['bike.endurance', 'run.easy'].includes(x.workout.code));
+  const r = await api('PATCH', `/api/sessions/${easy.id}`, { minutes: easy.workout.durationMin + 15 });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  data = (await api('GET', '/api/state')).data;
+  const after = data.sessions.find((x: any) => x.id === easy.id);
+  assert.ok(Math.abs(after.workout.durationMin - easy.workout.durationMin - 15) <= 5);
+  assert.equal(after.locked, true);
+  assert.equal(data.unsynced.changed, 1);
+  assert.match(data.undo.label, /Change to/);
+  await api('DELETE', `/api/sessions/${easy.id}`);
+  assert.equal((await api('GET', '/api/state')).data.unsynced.removed, 1);
+  assert.equal((await api('POST', '/api/undo', {})).status, 200);   // delete undone
+  assert.equal((await api('POST', '/api/undo', {})).status, 200);   // resize undone
+  data = (await api('GET', '/api/state')).data;
+  assert.equal(data.sessions.find((x: any) => x.id === easy.id).workout.durationMin, easy.workout.durationMin);
+  assert.deepEqual([data.unsynced.changed, data.unsynced.removed], [0, 0]);
+  // a hard session cannot be resized, but can be made easy
+  const hard = data.sessions.find((x: any) => x.workout.hard && x.sport === 'bike' && x.status === 'planned' && x.date > TODAY);
+  if (hard) {
+    assert.equal((await api('PATCH', `/api/sessions/${hard.id}`, { minutes: 30 })).status, 400);
+    assert.equal((await api('PATCH', `/api/sessions/${hard.id}`, { easy: true })).status, 200);
+    assert.equal((await api('GET', '/api/state')).data.sessions.find((x: any) => x.id === hard.id).workout.hard, false);
+  }
+
+  // availability preview: nothing saved, optimal versus limited
+  const open = { days: Array.from({ length: 7 }, () => ({ minutes: null, pool: true, gym: true })), fixed: { swim: [0, 2, 4] } };
+  const pv = await api('POST', '/api/availability/preview', { availability: open, week: 'peak' });
+  assert.equal(pv.status, 200, JSON.stringify(pv.data));
+  assert.equal(pv.data.limited, false);
+  assert.equal(pv.data.days.length, 7);
+  assert.deepEqual(pv.data.days.map((d: any, i: number) => (d.sessions.some((x: any) => x.sport === 'swim') ? i : -1)).filter((i: number) => i >= 0), [0, 2, 4]);
+  const tight = { ...open, days: open.days.map((d, i) => (i >= 1 && i <= 4 ? { ...d, minutes: 45 } : d)) };
+  const pv2 = await api('POST', '/api/availability/preview', { availability: tight, week: 'peak' });
+  assert.equal(pv2.data.limited, true);
+  assert.ok(pv2.data.minutes < pv2.data.optimal.minutes, 'limits cost training time and the preview says so');
+  assert.ok(pv2.data.days.slice(1, 5).every((d: any) => d.minutes <= 55), JSON.stringify(pv2.data.days.map((d: any) => d.minutes))); // swims are sized in whole lengths, so a few minutes over
+  const saved = (await api('GET', '/api/state')).data.availability;
+  assert.ok(!saved.fixed?.swim, 'preview saved nothing');
+  assert.equal((await api('PUT', '/api/availability', { ...tight, overrides: {} })).status, 200);
+  const now = (await api('GET', '/api/state')).data;
+  assert.deepEqual(now.availability.fixed.swim, [0, 2, 4]);
+  assert.equal(now.availability.days[0].minutes, null);
+  assert.equal(now.weekStats[now.currentWeek].start, '2026-11-09');
+});

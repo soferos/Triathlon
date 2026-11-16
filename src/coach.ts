@@ -305,7 +305,10 @@ export function chatView(s: State) {
 }
 
 /** Send one athlete message, let Claude use tools until it is done, and return its reply. */
-export async function coachTurn(s: State, today: string, message: string): Promise<{ reply: string; changes: string[] }> {
+/**
+ * @param onText when given, the reply is streamed and each piece of text is passed on as it arrives
+ */
+export async function coachTurn(s: State, today: string, message: string, onText?: (text: string) => void): Promise<{ reply: string; changes: string[] }> {
   if (!coachConfigured(s)) throw new CoachError(400, 'Add your Anthropic API key under Connect to use the coach.');
   const anthropic = await client(s.coach.apiKey);
   const { APIError, AuthenticationError, RateLimitError, APIConnectionError, PermissionDeniedError } = sdk!;
@@ -316,7 +319,7 @@ export async function coachTurn(s: State, today: string, message: string): Promi
   const texts: string[] = [];
   try {
     for (let turn = 0; turn < MAX_TURNS; turn++) {
-      const res = await anthropic.beta.messages.create({
+      const params = {
         model: COACH_MODEL,
         max_tokens: 16000,
         system: SYSTEM,
@@ -328,7 +331,15 @@ export async function coachTurn(s: State, today: string, message: string): Promi
         // If a safety classifier declines a request, let the API retry it on a fallback model.
         betas: ['server-side-fallback-2026-07-01'],
         fallbacks: 'default',
-      });
+      } satisfies Anthropic.Beta.MessageCreateParamsNonStreaming;
+      let res: Anthropic.Beta.BetaMessage;
+      if (onText) {
+        // Tool inputs stay buffered (no eager input streaming): they are small here and arrive validated.
+        const stream = anthropic.beta.messages.stream(params);
+        let first = true;
+        stream.on('text', (delta) => { onText(first && texts.length ? `\n\n${delta}` : delta); first = false; });
+        res = await stream.finalMessage();
+      } else res = await anthropic.beta.messages.create(params);
       // Preserve every block (thinking included) so the next request replays the history unchanged.
       messages.push({ role: 'assistant', content: res.content as Anthropic.Beta.BetaContentBlockParam[] });
       for (const b of res.content) if (b.type === 'text' && b.text.trim()) texts.push(b.text.trim());
