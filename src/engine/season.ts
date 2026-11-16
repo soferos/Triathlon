@@ -166,7 +166,7 @@ export function buildSeason(input: SeasonInput): { weeks: SeasonWeek[]; warnings
 
   // 5. Load targets via forward CTL simulation.
   let ctl = input.ctl ?? (profile.currentWeeklyHours * 52) / 7;
-  const mult = RAMP[profile.ramp];
+  const mult = profile.ramp === 'learned' ? Math.max(2, Math.min(7, profile.learnedRamp ?? 4)) / 4 : RAMP[profile.ramp];
   const decay = 1 - Math.exp(-7 / 42);
   let lastLoad = ctl * 7;
   for (const w of weeks) {

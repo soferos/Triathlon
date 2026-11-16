@@ -182,3 +182,34 @@ test('full history import walks back year by year, merges on re-sync and reports
   assert.equal(again.data.activities, 4);
   assert.equal(icu.calls.filter((c) => c.includes('/activities?')).length, 1);
 });
+
+test('race course, target splits and niggles round-trip through the API', async () => {
+  await api('PUT', '/api/races', [{ name: 'Course race', date: '2027-06-27', type: 'half', priority: 'A' }]);
+  let { data } = await api('GET', '/api/state');
+  const race = data.races.find((r: any) => r.name === 'Course race');
+  const pts: number[][] = [];
+  for (let i = 0; i <= 800; i++) pts.push([45, 7 + (i * 50) / 78850, 100 + (i > 200 && i <= 300 ? (i - 200) * 2.5 : i > 300 && i <= 400 ? (400 - i) * 2.5 : 0)]);
+  assert.equal((await api('PUT', `/api/races/${race.id}`, { bikePoints: [[1, 2, 3]] })).status, 400);
+  const r = await api('PUT', `/api/races/${race.id}`, { bikePoints: pts, tempC: 28, cda: 0.25, podium: { swim: 1740, bike: 4200, run: 4920 } });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  // saving the race list again must not drop the course
+  await api('PUT', '/api/races', [{ id: race.id, name: 'Course race', date: '2027-06-27', type: 'half', priority: 'A' }]);
+  data = (await api('GET', '/api/state')).data;
+  const saved = data.races.find((q: any) => q.id === race.id);
+  assert.ok(Math.abs(saved.course.bike.km - 40) < 0.3);
+  assert.equal(saved.course.bike.climbs.length, 1);
+  assert.equal(saved.course.tempC, 28);
+  assert.equal(saved.podium.bike, 4200);
+  assert.equal(saved.analysis.demands.hot, true);
+  assert.ok(saved.analysis.prediction.bike.np > 0);
+  assert.equal(saved.analysis.gap.rows.length, 3);
+  assert.equal((await api('PUT', '/api/races/nope', {})).status, 404);
+
+  assert.equal((await api('POST', '/api/niggles', { area: '' })).status, 400);
+  await api('POST', '/api/niggles', { area: 'right knee', sport: 'run', severity: 3 });
+  data = (await api('GET', '/api/state')).data;
+  assert.equal(data.niggles.length, 1);
+  assert.equal((await api('PATCH', `/api/niggles/${data.niggles[0].id}`, { resolved: true })).status, 200);
+  assert.equal((await api('GET', '/api/state')).data.niggles.length, 0);
+  assert.ok('comeback' in data.insights && 'ramp' in data.insights);
+});

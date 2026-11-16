@@ -6,6 +6,8 @@ import { addDays, diffDays, DAY_NAMES, dow, mondayOf } from './engine/dates.ts';
 import { assessReadiness } from './engine/readiness.ts';
 import { summarizeHistory } from './engine/history.ts';
 import { proposeAdaptations } from './engine/adapt.ts';
+import { gapAnalysis, predictRace } from './engine/course.ts';
+import { comebackTracker, learnedRamp } from './engine/insights.ts';
 import { currentCtl, customWorkout, generate, uid, type State } from './engine/plan.ts';
 import { finalize, toIcuText, zoneTable } from './engine/zones.ts';
 import type { Session } from './engine/types.ts';
@@ -41,6 +43,8 @@ Changing the plan:
 Health: the app does not know why they took the break. If they describe symptoms that could be cardiac, respiratory, a bone stress injury, or signs of low energy availability, say plainly that a doctor needs to look at it before intensity continues, and adjust the plan conservatively. Otherwise do not lecture about health.
 
 Style: plain text only, since the app does not render markdown. Short paragraphs; use lines starting with "- " for lists. Give targets in the athlete's own units (watts, pace per km, pace per 100 m) when thresholds are known. Answer the question first, then the reasoning. Keep answers as short as the question allows.`;
+
+export const DEBRIEF_PROMPT = `Give me my weekly debrief. Cover, in this order: (1) what I actually did against the plan over the last 7 days — volume, load, and how I executed the key sessions; (2) what that says about where I am — fitness, fatigue, readiness, anything in the niggle log; (3) the one or two things that matter most in the coming week and anything you would change in it. Use get_sessions and get_history if the snapshot is not enough. Do not change the plan in this message; propose changes and I will tell you which to make. Be direct and specific to my numbers.`;
 
 const stepSchema = {
   type: 'object',
@@ -135,6 +139,22 @@ export function coachContext(s: State, today: string): string {
   const sess = s.sessions.filter((x) => x.date >= from && x.date <= to);
   if (sess.length) { out.push(`Sessions ${from} to ${to}:`); for (const x of sess) out.push(`  ${line(x)}`); }
 
+  const hms = (t: number) => `${Math.floor(t / 3600)}:${String(Math.floor((t % 3600) / 60)).padStart(2, '0')}:${String(Math.round(t % 60)).padStart(2, '0')}`;
+  for (const r of races.filter((x) => x.priority === 'A').slice(0, 2)) {
+    const pr = predictRace(r, p), gap = gapAnalysis(r, p);
+    if (pr?.total) out.push(`Predicted for ${r.name} on current thresholds: ${hms(pr.total)} (${pr.legs.map((l) => `${l.label} ${l.secs ? hms(l.secs) : '?'}`).join(', ')}).${r.course?.bike ? ` Bike course ${r.course.bike.km} km with ${r.course.bike.gain} m climbing, ${r.course.bike.climbs.length} climbs.` : ''}${r.course?.tempC != null ? ` Expected ${r.course.tempC} °C.` : ''}`);
+    if (gap?.rows.length) out.push(`Against the athlete's target splits: ${gap.text}`);
+  }
+  const execs = s.sessions.filter((x) => x.actual?.exec && x.date >= addDays(today, -14));
+  if (execs.length) out.push(`Execution of recent key sessions: ${execs.map((x) => `${x.date} ${x.workout.name}: ${x.actual!.exec!.verdict} — ${x.actual!.exec!.text}`).join(' | ')}`);
+  const prog = Object.entries(s.progress ?? {}).filter(([, v]) => v);
+  if (prog.length) out.push(`Progression offsets earned from execution (levels ahead/behind the calendar): ${prog.map(([k, v]) => `${k} ${v > 0 ? '+' : ''}${v}`).join(', ')}`);
+  const niggles = (s.niggles ?? []).filter((n) => !n.resolved);
+  if (niggles.length) out.push(`Open niggles: ${niggles.map((n) => `${n.area} (affects ${n.sport}, severity ${n.severity}/3, since ${n.date}${n.note ? `: ${n.note}` : ''})`).join('; ')}`);
+  const cb = comebackTracker(p, s.activities, s.wellness, s.season?.weeks ?? [], today);
+  if (cb) out.push(`Versus pre-break self (break ${cb.window.start} to ${cb.window.end}): ${cb.rows.filter((r) => r.pct != null).map((r) => `${r.label} ${r.now} vs ${r.before} (${r.pct}%)`).join('; ')}.${cb.regain ? (cb.regain.date ? ` Planned fitness regains 95% of the pre-break peak by ${cb.regain.date}.` : ` The planned season peaks at ${cb.regain.peakPct}% of pre-break fitness.`) : ''}`);
+  const lr = learnedRamp(s.wellness);
+  if (lr) out.push(`Historically sustainable ramp: about ${lr.suggested} CTL/week. ${lr.text}`);
   const adapt = proposeAdaptations(s, today);
   if (adapt.length) out.push(`Adaptations the app is currently proposing (not applied): ${adapt.map((a) => `${a.title} — ${a.detail} ${a.actions.join(' ')}`).join(' | ')}`);
   const ctl = currentCtl(s);

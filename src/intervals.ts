@@ -82,9 +82,16 @@ export class Intervals {
         tss: Math.round(r.icu_training_load ?? 0), distanceKm: r.distance ? Math.round(r.distance / 10) / 100 : undefined,
         np: num(r.icu_weighted_avg_watts), avgHr: num(r.average_heartrate),
         intensity: i ? Math.round(i > 3 ? i : i * 100) / 100 : undefined,
+        decoupling: typeof r.decoupling === 'number' && Number.isFinite(r.decoupling) ? Math.round(r.decoupling * 10) / 10 : undefined,
       } as Activity;
     });
     return { list, hidden: rows.filter(isStub).length };
+  }
+
+  /** Intervals Intervals.icu detected in one activity (laps or auto-detected work/recovery). */
+  async activityIntervals(activityId: string): Promise<any[]> {
+    const r = await this.req('GET', `/activity/${encodeURIComponent(activityId)}/intervals`);
+    return Array.isArray(r) ? r : Array.isArray(r?.icu_intervals) ? r.icu_intervals : [];
   }
 
   events(oldest: string, newest: string): Promise<any[]> {

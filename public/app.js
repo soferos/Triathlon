@@ -67,6 +67,7 @@ async function autoSync() {
     const r = await api('POST', '/api/intervals/sync', {});
     await load();
     if (r.adapted?.length) toast(`Plan adapted: ${r.adapted.join(' ')}`);
+    else if (r.graded) toast(`${r.graded} key ${r.graded === 1 ? 'session' : 'sessions'} graded against the plan`);
     else if (r.matched) toast(`${r.matched} completed ${r.matched === 1 ? 'activity' : 'activities'} matched to your plan`);
   } catch { await load().catch(() => {}); }
   syncing = false;
@@ -83,7 +84,7 @@ const saveAndReplan = (method, path, body, msg) => act(async () => {
 }, S.season ? `${msg} Future weeks re-planned.` : msg);
 
 const VIEWS = [
-  ['today', 'Today'], ['plan', 'Plan'], ['coach', 'Coach'], ['season', 'Season'], ['history', 'History'], ['races', 'Races & goals'], ['availability', 'Availability'],
+  ['today', 'Today'], ['plan', 'Plan'], ['coach', 'Coach'], ['season', 'Season'], ['history', 'History'], ['insights', 'Insights'], ['races', 'Races & goals'], ['availability', 'Availability'],
   ['workouts', 'Workouts'], ['strength', 'Strength'], ['profile', 'Profile & zones'], ['connect', 'Connect'], ['method', 'Method'],
 ];
 function go(v) { view = v; location.hash = v; render(); window.scrollTo(0, 0); }
@@ -92,7 +93,7 @@ window.addEventListener('hashchange', () => { const v = location.hash.slice(1); 
 function render() {
   $('#nav').replaceChildren(h('div', { class: 'brand' }, 'Triathlon Coach'),
     ...VIEWS.map(([id, label]) => h('button', { class: id === view ? 'on' : '', onclick: () => go(id) }, label)));
-  const fn = { coach: vCoach, history: vHistory, today: vToday, plan: vPlan, season: vSeason, races: vRaces, availability: vAvailability, workouts: vWorkouts, strength: vStrength, profile: vProfile, connect: vConnect, method: vMethod }[view] || vToday;
+  const fn = { insights: vInsights, coach: vCoach, history: vHistory, today: vToday, plan: vPlan, season: vSeason, races: vRaces, availability: vAvailability, workouts: vWorkouts, strength: vStrength, profile: vProfile, connect: vConnect, method: vMethod }[view] || vToday;
   $('#main').replaceChildren(...[fn()].flat());
 }
 const page = (title, sub, ...actions) => h('header', { class: 'page' }, h('div', {}, h('h1', {}, title), sub && h('div', { class: 'sub' }, sub)), h('div', { class: 'row right' }, actions));
@@ -128,7 +129,7 @@ function sessCard(x) {
   const a = x.actual;
   return h('div', { class: `sess ${x.sport} ${x.status} ${missed ? 'missed' : ''}`, onclick: () => sessionDialog(x) },
     h('div', { class: 't' }, x.workout.name),
-    a ? [h('div', { class: 'm did' }, `Did: ${actualLine(a)}`), h('div', { class: 'm' }, `Planned ${meta(x.workout)}${verdict(x) ? ` · ${verdict(x)}` : ''}`)]
+    a ? [h('div', { class: 'm did' }, `Did: ${actualLine(a)}`), h('div', { class: 'm' }, `Planned ${meta(x.workout)}${verdict(x) ? ` · ${verdict(x)}` : ''}${a.exec && a.exec.verdict !== 'unstructured' ? ` · reps ${EXEC[a.exec.verdict]}` : ''}`)]
       : h('div', { class: 'm' }, `${SPORT[x.sport]} · ${meta(x.workout)}${x.origin === 'adapted' ? ' · adapted' : x.origin === 'custom' ? ' · custom' : ''}${missed ? ' · not done' : ''}`));
 }
 // Proposed changes to the rest of the week, based on what was actually done.
@@ -143,6 +144,7 @@ function adaptCards() {
       h('div', { style: 'flex:1' }, h('b', {}, a.title), h('div', { class: 'small' }, a.detail), a.actions.length ? h('ul', { class: 'clean small', style: 'margin-top:4px' }, a.actions.map((t) => h('li', {}, t))) : null),
       h('button', { class: 'btn sm', onclick: () => act(() => api('POST', '/api/adapt/dismiss', { key: a.key }), 'Left as planned') }, a.actionable ? 'Keep as planned' : 'OK'))));
 }
+const EXEC = { nailed: 'on target', over: 'above target', under: 'below target', 'cut short': 'cut short', unstructured: 'could not be graded' };
 const actualLine = (a) => [hm(a.durationMin || 0), a.distanceKm && `${a.distanceKm} km`, `${a.tss ?? 0} TSS`, a.np && `NP ${Math.round(a.np)} W`, a.avgHr && `${Math.round(a.avgHr)} bpm`].filter(Boolean).join(' · ');
 // How the completed session compares with the plan, by duration.
 function verdict(x) {
@@ -182,6 +184,11 @@ function sessionDialog(x) {
           h('td', { class: 'num' }, x.actual.np ? `${Math.round(x.actual.np)} W` : '–'), h('td', { class: 'num' }, x.actual.avgHr ? Math.round(x.actual.avgHr) : '–'), h('td', { class: 'num' }, x.actual.intensity ?? '–')),
         h('tr', {}, h('td', {}, 'Planned'), h('td', { class: 'num' }, hm(x.workout.durationMin)), h('td', { class: 'num' }, `${x.workout.tss} TSS`), h('td', {}, ''), h('td', {}, ''), h('td', {}, ''), h('td', {}, '')))),
       verdict(x) && h('div', { class: 'small', style: 'margin-top:6px' }, `Versus plan: ${verdict(x)}.`)),
+    x.actual?.exec && h('div', { class: `notice ${x.actual.exec.verdict === 'nailed' ? 'good' : x.actual.exec.verdict === 'unstructured' ? 'info' : ''}` },
+      h('b', {}, `Execution: ${EXEC[x.actual.exec.verdict]}`), h('div', { class: 'small', style: 'margin-top:4px' }, x.actual.exec.text)),
+    x.actual?.decoupling != null && !x.workout.hard && h('div', { class: `notice ${Math.abs(x.actual.decoupling) <= 5 ? 'good' : ''}` },
+      h('b', {}, `Aerobic decoupling ${x.actual.decoupling}%`), h('div', { class: 'small', style: 'margin-top:4px' }, Math.abs(x.actual.decoupling) <= 5
+        ? 'Heart rate stayed coupled to output: you are aerobically durable at this duration and can extend it.' : 'Heart rate drifted against output in the second half: durability at this duration is still a limiter. Hold the length before adding more, and check fuelling and heat.')),
     x.actual && h('h3', {}, 'What was planned'),
     workoutDetail(x.workout),
     x.sport !== 'race' && x.sport !== 'strength' && h('details', {}, h('summary', { class: 'muted small' }, 'Intervals.icu workout text'), h('pre', { class: 'icu' }, x.workout.icu)),
@@ -243,7 +250,7 @@ function vToday() {
     S.extras.filter((a) => a.date === t).map(extraCard));
 
   const ws = S.weekStats[0];
-  const side = [readiness];
+  const side = [readiness, niggleCard(), debriefCard()];
   if (ws) side.push(card('This week',
     h('div', { class: 'grid g2' },
       h('div', {}, h('div', { class: 'label' }, 'Load'), h('div', { class: 'stat num' }, `${ws.doneTss} / ${ws.plannedTss}`), h('div', { class: 'muted small' }, 'TSS done / planned')),
@@ -341,12 +348,14 @@ function vRaces() {
   return [
     page('Races & goals', 'A-races shape the whole season. B-races get a short freshen-up. C-races are trained through.'),
     card('Race calendar',
-      h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['Race', 'Date', 'Type', 'Priority', 'Goal', ''].map((c) => h('th', {}, c)))),
+      h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['Race', 'Date', 'Type', 'Priority', 'Goal', 'Course', ''].map((c) => h('th', {}, c)))),
         h('tbody', {}, races.map((r, i) => h('tr', {}, h('td', {}, inp(r, 'name', { placeholder: 'Race name' })), h('td', {}, inp(r, 'date', { type: 'date' })), h('td', {}, sel(r, 'type', RACE_TYPES)),
-          h('td', {}, sel(r, 'priority', { A: 'A', B: 'B', C: 'C' })), h('td', {}, inp(r, 'goal', { placeholder: 'e.g. sub 4:30, AG podium' })), h('td', {}, del(races, i))))))),
+          h('td', {}, sel(r, 'priority', { A: 'A', B: 'B', C: 'C' })), h('td', {}, inp(r, 'goal', { placeholder: 'e.g. sub 4:30, AG podium' })),
+          h('td', {}, r.id && S.races.some((x) => x.id === r.id) ? h('button', { class: 'btn sm', onclick: () => courseDialog(r.id) }, r.course || r.podium ? 'Course & targets ✓' : 'Course & targets') : h('span', { class: 'muted small' }, 'save first')),
+          h('td', {}, del(races, i))))))),
       h('div', { class: 'row', style: 'margin-top:10px' },
         btn('Add race', () => { races.push({ name: '', date: addDays(S.today, 120), type: 'half', priority: 'A' }); render(); }),
-        btn('Save races', () => saveAndReplan('PUT', '/api/races', races, 'Races saved.').then(() => delete draft.races), 'primary'))),
+        btn('Save races', () => saveAndReplan('PUT', '/api/races', races, 'Races saved.').then(() => { delete draft.races; render(); }), 'primary'))),
     card('Goals',
       h('p', { class: 'muted small' }, 'Performance, health, skill and life goals in one place. Season goals should serve the long-term ones — review them at every recovery week.'),
       h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['Goal', 'Area', 'Horizon', 'Measure / target', 'By', 'Status', ''].map((c) => h('th', {}, c)))),
@@ -473,7 +482,7 @@ function vProfile() {
     card('Training load', h('div', { class: 'form' },
       field('Max weekly hours', num('maxWeeklyHours', { min: 3, max: 35, step: 0.5 })),
       field('Current weekly hours (last 4 weeks)', num('currentWeeklyHours', { min: 0, max: 35, step: 0.5 })),
-      field('Progression rate', sel(p, 'ramp', { conservative: 'Conservative (~3 CTL/wk)', moderate: 'Moderate (~4 CTL/wk)', aggressive: 'Aggressive (~5 CTL/wk)' })),
+      field('Progression rate', sel(p, 'ramp', { conservative: 'Conservative (~3 CTL/wk)', moderate: 'Moderate (~4 CTL/wk)', aggressive: 'Aggressive (~5 CTL/wk)', ...(S.insights.ramp ? { learned: `From my history (~${S.insights.ramp.suggested} CTL/wk)` } : {}) })),
       field('Recovery cycle', sel(p, 'recoveryCycle', { auto: 'Auto (by age)', '3:1': '3 weeks on, 1 easy', '2:1': '2 weeks on, 1 easy' })),
       field('Limiter (gets extra time)', sel(p, 'limiter', { none: 'Balanced', swim: 'Swim', bike: 'Bike', run: 'Run' })),
       field('Strength equipment', sel(p, 'strengthEquipment', { gym: 'Full gym (barbell)', home: 'Home (dumbbells, bands)' })),
@@ -535,6 +544,147 @@ function vConnect() {
 const hiddenNotice = () => h('div', { class: 'notice' },
   `${S.intervals.hidden} of your activities reached Intervals.icu through Strava. Strava’s terms stop Intervals.icu from passing those on, so they cannot be imported here (their load still counts in your fitness numbers). To get them: connect Garmin / Wahoo / Zwift / Apple Health directly to Intervals.icu, or bulk-upload your Strava export archive to Intervals.icu, then re-import.`);
 
+// ---------------- Course, targets, niggles, debrief, insights ----------------
+const hms = (t) => (t == null ? '—' : `${Math.floor(t / 3600)}:${String(Math.floor((t % 3600) / 60)).padStart(2, '0')}:${String(Math.round(t % 60)).padStart(2, '0')}`);
+const parseHms = (v) => { const p = String(v || '').trim().split(':').map(Number); if (!p.length || p.some((n) => !Number.isFinite(n)) || !String(v).trim()) return null; return p.reduce((t, n) => t * 60 + n, 0) * (p.length === 1 ? 60 : 1); };
+// Read a GPX file in the browser and reduce it to [lat, lon, ele] points for the server.
+async function readGpx(file) {
+  const doc = new DOMParser().parseFromString(await file.text(), 'application/xml');
+  let nodes = [...doc.getElementsByTagName('trkpt')];
+  if (!nodes.length) nodes = [...doc.getElementsByTagName('rtept')];
+  const pts = nodes.map((n) => [parseFloat(n.getAttribute('lat')), parseFloat(n.getAttribute('lon')), parseFloat(n.getElementsByTagName('ele')[0]?.textContent)]).filter((p) => p.every(Number.isFinite));
+  if (pts.length < 2) throw new Error('No track points with elevation found in that GPX file.');
+  const stride = Math.ceil(pts.length / 8000);
+  return pts.filter((_, i) => i % stride === 0 || i === pts.length - 1);
+}
+function elevationChart(leg, cls) {
+  const W = 620, H = 120, pts = leg.profile, maxD = pts.at(-1)[0], lo = Math.min(...pts.map((p) => p[1])), hi = Math.max(...pts.map((p) => p[1]), lo + 50);
+  const x = (d) => 30 + (d / maxD) * (W - 34), y = (e) => 6 + (H - 26) * (1 - (e - lo) / (hi - lo));
+  const g = svg('svg', { viewBox: `0 0 ${W} ${H}`, style: 'width:100%;height:auto', role: 'img', 'aria-label': 'Elevation profile', class: cls });
+  g.append(svg('polygon', { points: `${x(0)},${H - 20} ${pts.map((p) => `${x(p[0])},${y(p[1])}`).join(' ')} ${x(maxD)},${H - 20}`, fill: 'var(--c)', opacity: 0.35 }),
+    svg('polyline', { points: pts.map((p) => `${x(p[0])},${y(p[1])}`).join(' '), fill: 'none', stroke: 'var(--c)', 'stroke-width': 1.5 }),
+    svg('text', { x: 0, y: y(hi) + 8 }, `${hi} m`), svg('text', { x: 0, y: H - 22 }, `${lo} m`), svg('text', { x: 30, y: H - 4 }, '0'), svg('text', { x: W - 4, y: H - 4, 'text-anchor': 'end' }, `${maxD} km`));
+  return g;
+}
+function courseDialog(id) {
+  const r = S.races.find((x) => x.id === id);
+  if (!r) return;
+  const c = r.course || {}, a = r.analysis, pod = r.podium || {};
+  const f = { cda: c.cda ?? '', bikeKg: c.bikeKg ?? '', tempC: c.tempC ?? '', transitionMin: c.transitionMin ?? '', wetsuit: !!c.wetsuit, swim: pod.swim ? hms(pod.swim) : '', bike: pod.bike ? hms(pod.bike) : '', run: pod.run ? hms(pod.run) : '', total: pod.total ? hms(pod.total) : '' };
+  const inp = (key, attrs = {}) => h('input', { value: f[key], oninput: (e) => (f[key] = e.target.value), style: 'width:110px', ...attrs });
+  const bikeFile = h('input', { type: 'file', accept: '.gpx' }), runFile = h('input', { type: 'file', accept: '.gpx' });
+  const save = (extra = {}) => act(async () => {
+    const body = { cda: f.cda, bikeKg: f.bikeKg, tempC: f.tempC, transitionMin: f.transitionMin, wetsuit: f.wetsuit,
+      podium: { swim: parseHms(f.swim), bike: parseHms(f.bike), run: parseHms(f.run), total: parseHms(f.total) }, ...extra };
+    if (bikeFile.files[0]) body.bikePoints = await readGpx(bikeFile.files[0]);
+    if (runFile.files[0]) body.runPoints = await readGpx(runFile.files[0]);
+    await api('PUT', `/api/races/${id}`, body);
+    if (S.season) await api('POST', '/api/plan/generate', {});
+  }, 'Course saved. Future weeks re-planned.').then(() => { delete draft.races; courseDialog(id); });
+  const pr = a.prediction, bp = pr?.bike, gap = a.gap;
+  const legRow = (leg, label, cls, clear) => leg && h('div', { class: cls, style: 'margin-bottom:12px' },
+    h('div', { class: 'row' }, h('b', {}, `${label}: ${leg.km} km · ${leg.gain} m climbing · ${leg.climbs.length} climb${leg.climbs.length === 1 ? '' : 's'}`), h('button', { class: 'btn sm danger right', onclick: () => save({ [clear]: true }) }, 'Remove')),
+    elevationChart(leg, cls));
+  openDialog('race', `${r.name} — course & targets`, [
+    h('h3', {}, 'Course'),
+    legRow(c.bike, 'Bike', 'bike', 'clearBike'), legRow(c.run, 'Run', 'run', 'clearRun'),
+    h('div', { class: 'form' }, field(c.bike ? 'Replace bike GPX' : 'Bike course GPX', bikeFile), field(c.run ? 'Replace run GPX' : 'Run course GPX', runFile)),
+    h('div', { class: 'form', style: 'margin-top:10px' },
+      field('Expected temperature (°C)', inp('tempC', { type: 'number' })), field('CdA in race position (m²)', inp('cda', { type: 'number', step: '0.01', placeholder: '0.27' })),
+      field('Bike + kit weight (kg)', inp('bikeKg', { type: 'number', step: '0.1', placeholder: '9' })), field('Transitions, total (min)', inp('transitionMin', { type: 'number', step: '0.5' })),
+      h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: f.wetsuit, onchange: (e) => (f.wetsuit = e.target.checked) }), 'Wetsuit swim')),
+    h('p', { class: 'muted small', style: 'margin-top:8px' }, 'CdA is the biggest unknown in the bike prediction: about 0.22–0.25 for a dialled TT position, 0.26–0.30 typical, 0.32+ on a road bike. If you know a past split on a known course, adjust it until the prediction matches.'),
+    h('h3', { style: 'margin-top:14px' }, 'Target splits'),
+    h('p', { class: 'muted small' }, 'The times that reach your goal — e.g. last year’s age-group podium at this race. Format h:mm:ss.'),
+    h('div', { class: 'form' }, field('Swim', inp('swim', { placeholder: '0:29:30' })), field('Bike', inp('bike', { placeholder: '2:18:00' })), field('Run', inp('run', { placeholder: '1:24:00' })), field('Total', inp('total', { placeholder: '4:18:00' }))),
+    h('div', { style: 'margin:12px 0' }, btn('Save', () => save(), 'primary')),
+    pr && [h('h3', {}, 'Prediction on current thresholds'),
+      pr.missing.length ? h('div', { class: 'notice' }, `Missing: ${pr.missing.join(', ')} — set them in Profile for a full prediction.`) : null,
+      h('table', {}, h('thead', {}, h('tr', {}, ['Leg', 'Distance', 'Predicted', 'Target', 'Gap', 'Basis'].map((x) => h('th', {}, x)))), h('tbody', {},
+        pr.legs.map((l) => { const g = gap?.rows.find((q) => q.sport === l.sport && pr.legs.filter((z) => z.sport === l.sport).length === 1);
+          return h('tr', {}, h('td', {}, h('b', {}, l.label)), h('td', { class: 'num' }, `${l.km} km`), h('td', { class: 'num' }, hms(l.secs)), h('td', { class: 'num' }, g ? hms(g.target) : ''),
+            h('td', { class: 'num', style: g ? `color:var(--${g.gap > 0 ? 'bad' : 'good'})` : '' }, g ? `${g.gap > 0 ? '+' : '−'}${hms(Math.abs(g.gap)).replace(/^0:/, '')}` : ''), h('td', { class: 'small muted' }, l.note)); }),
+        h('tr', {}, h('td', {}, h('b', {}, 'Total')), h('td', {}, pr.transitions ? h('span', { class: 'small muted' }, `incl. ${Math.round(pr.transitions / 60)} min transitions`) : ''), h('td', { class: 'num' }, h('b', {}, hms(pr.total))), h('td', { class: 'num' }, pod.total ? hms(pod.total) : ''),
+          h('td', { class: 'num' }, gap?.totalGap != null ? `${gap.totalGap > 0 ? '+' : '−'}${hms(Math.abs(gap.totalGap)).replace(/^0:/, '')}` : ''), h('td', {}, '')))),
+      gap && h('div', { class: 'notice info', style: 'margin-top:10px' }, gap.text, gap.focus && S.profile.limiter !== gap.focus
+        ? h('div', { style: 'margin-top:8px' }, btn(`Give the ${gap.focus} extra training time`, () => act(async () => { await api('PUT', '/api/profile', { ...S.profile, limiter: gap.focus }); if (S.season) await api('POST', '/api/plan/generate', {}); }, `Limiter set to ${gap.focus}. Future weeks re-planned.`).then(() => courseDialog(id)), 'sm primary'))
+        : gap.focus ? h('div', { class: 'small', style: 'margin-top:6px' }, `Your plan already gives the ${gap.focus} extra time.`) : null)],
+    bp && c.bike && [h('h3', { style: 'margin-top:14px' }, 'Bike pacing plan'),
+      h('p', {}, `Hold normalised power at ${bp.np} W: about ${bp.flatWatts} W on the flat, more on the climbs, less on the descents. Average ${bp.avgWatts} W, ${bp.kph} km/h, ${bp.kj} kJ — roughly ${Math.round(bp.secs / 3600 * 80 / 5) * 5}–${Math.round(bp.secs / 3600 * 100 / 5) * 5} g carbohydrate on the bike.`),
+      bp.climbs.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Climb at', 'Length', 'Gain', 'Grade', 'Power', 'Time'].map((x) => h('th', {}, x)))), h('tbody', {},
+        bp.climbs.map((cl) => h('tr', {}, h('td', { class: 'num' }, `${cl.startKm} km`), h('td', { class: 'num' }, `${cl.km} km`), h('td', { class: 'num' }, `${cl.gain} m`), h('td', { class: 'num' }, `${cl.grade}%`), h('td', { class: 'num' }, h('b', {}, `${cl.watts} W`)), h('td', { class: 'num' }, `${cl.min} min`))))) : null],
+    a.demands && h('div', { class: 'notice good', style: 'margin-top:12px' }, h('b', {}, 'How this shapes your training: '),
+      [a.demands.climbMin.length && a.demands.terrain !== 'flat' ? `the race-pace bike session in the specific block becomes reps of about ${Math.round([...a.demands.climbMin].sort((x, y) => x - y)[a.demands.climbMin.length >> 1])} min at ${Math.round(a.demands.climbFrac * 100)}% FTP, matching the course’s climbs` : a.demands.terrain === 'rolling' ? 'the race-pace bike session becomes surge-and-settle work for rolling terrain' : 'steady race-power work for a flat course',
+        a.demands.runHilly && 'hill reps alternate with the key run', a.demands.hot && 'easy sessions in the last three weeks carry heat-acclimation instructions'].filter(Boolean).join('; ') + '.'),
+  ]);
+}
+function niggleCard() {
+  const list = S.niggles || [];
+  const f = draft.niggle ??= { area: '', sport: 'run', severity: 1 };
+  return card('Niggles',
+    list.length ? list.map((n) => h('div', { class: 'signal' }, h('span', { class: `pill ${n.severity === 3 ? 'bad' : n.severity === 2 ? 'warn' : ''}` }, `${n.severity}/3`),
+      h('div', { style: 'flex:1' }, h('b', {}, n.area), h('div', { class: 'muted small' }, `Affects ${n.sport} · since ${fmtDate(n.date)}${n.note ? ` · ${n.note}` : ''}`)),
+      h('select', { onchange: (e) => act(() => api('PATCH', `/api/niggles/${n.id}`, { severity: +e.target.value }), 'Updated') }, [1, 2, 3].map((v) => h('option', { value: v, selected: n.severity === v }, `${v}`))),
+      h('button', { class: 'btn sm', onclick: () => act(() => api('PATCH', `/api/niggles/${n.id}`, { resolved: true }), 'Marked as resolved') }, 'Resolved')))
+      : h('p', { class: 'muted small' }, 'Nothing logged. Log anything that hurts or changes how you move; the plan pulls intensity or swaps sessions before it becomes an injury.'),
+    h('details', {}, h('summary', {}, 'Log a niggle'),
+      h('div', { class: 'form', style: 'margin-top:10px' },
+        field('Where', h('input', { value: f.area, placeholder: 'e.g. left Achilles', oninput: (e) => (f.area = e.target.value) })),
+        field('Affects', h('select', { onchange: (e) => (f.sport = e.target.value) }, ['run', 'bike', 'swim'].map((v) => h('option', { value: v, selected: f.sport === v }, SPORT[v])))),
+        field('Severity', h('select', { onchange: (e) => (f.severity = +e.target.value) }, [[1, '1 · aware of it'], [2, '2 · alters how I move'], [3, '3 · painful']].map(([v, l]) => h('option', { value: v, selected: f.severity === v }, l))))),
+      h('div', { style: 'margin-top:10px' }, btn('Log it', () => act(() => api('POST', '/api/niggles', f), 'Logged').then(() => delete draft.niggle)))));
+}
+let debriefing = false;
+async function runDebrief() {
+  if (debriefing) return;
+  debriefing = true; render();
+  try { await api('POST', '/api/coach/debrief', {}); } catch (e) { toast(e.message, true); }
+  debriefing = false; await load();
+}
+function debriefCard() {
+  if (!S.coach.configured || !S.season) return null;
+  const d = S.debrief;
+  const stale = !d || d.week !== S.season.weeks[0].start;
+  return card('Weekly debrief',
+    d ? [h('div', { class: 'muted small' }, `Written ${new Date(d.at).toLocaleDateString()}${stale ? ' — for a previous week' : ''}`), h('div', { class: 'msg assistant', style: 'max-width:100%;margin-top:8px' }, d.text)]
+      : h('p', { class: 'muted small' }, 'A written review of your last 7 days against the plan, with what to change next. Uses the coach.'),
+    h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { class: `btn ${stale ? 'primary' : ''}`, disabled: debriefing, onclick: runDebrief }, debriefing ? 'Writing…' : d ? 'Write a new one' : 'Write my debrief'),
+      d && btn('Discuss with coach', () => go('coach'))));
+}
+function vInsights() {
+  const I = S.insights, out = [page('Insights', 'What your own data says: against your pre-break self, your target, and your history.')];
+  const aRace = S.races.filter((r) => r.priority === 'A' && r.date >= S.today).sort((a, b) => a.date.localeCompare(b.date))[0];
+  if (aRace) {
+    const pr = aRace.analysis.prediction, gap = aRace.analysis.gap;
+    out.push(card(`${aRace.name} — where you stand`,
+      pr?.total ? h('div', { class: 'row' }, h('div', {}, h('div', { class: 'label' }, 'Predicted today'), h('div', { class: 'stat num' }, hms(pr.total))),
+        aRace.podium?.total && h('div', {}, h('div', { class: 'label' }, 'Target'), h('div', { class: 'stat num' }, hms(aRace.podium.total))),
+        h('div', { class: 'muted small' }, pr.legs.map((l) => `${l.label} ${hms(l.secs)}`).join(' · '))) : h('p', { class: 'muted' }, pr ? `Set ${pr.missing.join(', ')} in Profile for a prediction.` : 'No prediction for this race type.'),
+      gap ? h('p', { style: 'margin-top:10px' }, gap.text) : h('p', { class: 'muted small', style: 'margin-top:10px' }, 'Add target splits to see which discipline is worth the most training time.'),
+      h('div', { style: 'margin-top:8px' }, btn(aRace.course || aRace.podium ? 'Open course & targets' : 'Add course & target splits', () => courseDialog(aRace.id), 'primary'))));
+  } else out.push(card('Race prediction', h('p', { class: 'muted' }, 'Add an A-race to see predicted splits, the gap to your target and course-specific training.')));
+  const cb = I.comeback;
+  out.push(card('Against your pre-break self', cb ? [
+    h('p', { class: 'muted small' }, `Break ${fmtDate(cb.window.start, true)} – ${fmtDate(cb.window.end, true)} (${cb.window.source === 'profile' ? 'from your profile' : 'detected from your training history — set the dates in Profile if this is wrong'}). “Before” is your best in the 12 months leading into it.`),
+    h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['', 'Before', 'Since return', ''].map((x) => h('th', {}, x)))), h('tbody', {}, cb.rows.map((r) => h('tr', {}, h('td', {}, r.label), h('td', { class: 'num' }, r.before), h('td', { class: 'num' }, r.now),
+      h('td', { style: 'width:38%' }, r.pct == null ? h('span', { class: 'muted small' }, 'not yet done') : h('div', { class: 'row', style: 'flex-wrap:nowrap' }, h('div', { style: 'flex:1;height:8px;background:var(--panel2);border-radius:4px;overflow:hidden' }, h('div', { style: `width:${Math.min(100, r.pct)}%;height:100%;background:var(--${r.pct >= 97 ? 'good' : 'accent'})` })), h('span', { class: 'num small', style: 'width:42px;text-align:right' }, `${r.pct}%`)))))))),
+    cb.regain && h('p', { style: 'margin-top:10px' }, cb.regain.date ? `On the current plan your fitness is back to 95% of the pre-break peak in the week ending ${fmtDate(cb.regain.date, true)}.` : `The current plan peaks at ${cb.regain.peakPct}% of your pre-break fitness; more weekly time would be needed to regain it fully this season.`),
+    h('p', { class: 'muted small' }, 'Power and pace rows compare whole-session averages (normalised power, distance ÷ time), not peak efforts inside a session.'),
+  ] : h('p', { class: 'muted' }, 'No lay-off found in your imported history. Set the weeks off and the date you resumed in Profile to track your return.')));
+  const lr = I.ramp;
+  out.push(card('Your sustainable progression', lr ? [
+    h('div', { class: 'row' }, h('div', { class: 'stat num' }, `${lr.suggested}`), h('span', { class: 'muted' }, 'CTL points per week')),
+    h('p', { style: 'margin-top:8px' }, lr.text),
+    h('p', { class: 'muted small' }, 'A sharp drop in training looks the same in the data whether it was illness, injury or life, so treat this as a guide. It can drive the plan: choose “From my history” as the progression rate in Profile.'),
+    S.profile.ramp === 'learned' ? h('span', { class: 'pill good' }, 'In use') : btn('Use this rate for my plan', () => act(async () => { await api('PUT', '/api/profile', { ...S.profile, ramp: 'learned' }); if (S.season) await api('POST', '/api/plan/generate', {}); }, 'Progression rate set from your history. Future weeks re-planned.')),
+  ] : h('p', { class: 'muted' }, 'Needs at least six months of fitness history with a few sustained build blocks. Import your history under Connect.')));
+  const prog = Object.entries(I.progress).filter(([, v]) => v);
+  out.push(card('Progression earned from execution',
+    prog.length ? h('table', {}, h('tbody', {}, prog.map(([k, v]) => h('tr', {}, h('td', {}, k.replace('.', ' · ')), h('td', {}, h('span', { class: `pill ${v > 0 ? 'good' : 'warn'}` }, `${v > 0 ? '+' : ''}${v} level${Math.abs(v) === 1 ? '' : 's'}`)), h('td', { class: 'small muted' }, v > 0 ? 'You beat the targets with every rep done; the next one of these skips ahead.' : 'Reps were missed or below target; the next one repeats an easier level.')))))
+      : h('p', { class: 'muted' }, 'Key sessions are graded rep by rep after each sync. Beat the targets and the next session of that type moves up a level; miss them and it steps back. Nothing has moved yet.')));
+  return out;
+}
+
 // ---------------- Coach ----------------
 const coach = { pending: null, changes: [], input: '' };
 function askCoach(text) { coach.input = text; go('coach'); }
@@ -564,7 +714,7 @@ function vCoach() {
   setTimeout(() => { log.scrollTop = log.scrollHeight; if (!coach.pending) ta.focus(); });
   return [
     page('Coach', `Claude (${S.coach.model}) with access to your plan and history.`,
-      S.coach.messages.length ? btn('New conversation', () => confirm('Clear this conversation?') && act(() => api('DELETE', '/api/coach'), 'Conversation cleared').then(() => (coach.changes = []))) : null),
+      btn('Weekly debrief', runDebrief), S.coach.messages.length ? btn('New conversation', () => confirm('Clear this conversation?') && act(() => api('DELETE', '/api/coach'), 'Conversation cleared').then(() => (coach.changes = []))) : null),
     h('div', { class: 'card' }, log,
       !msgs.length && h('div', { class: 'row', style: 'margin:10px 0' }, ideas.map((t) => h('button', { class: 'btn sm', onclick: () => { coach.input = t; sendCoach(); } }, t))),
       h('div', { class: 'row', style: 'margin-top:10px;align-items:flex-end' }, h('div', { style: 'flex:1;min-width:200px' }, ta), h('button', { class: 'btn primary', disabled: !!coach.pending, onclick: sendCoach }, 'Send'))),

@@ -1,6 +1,6 @@
 // Workout library. Every builder takes a target duration (min) and a progression level and returns
 // a fully structured session. Intensities are fractions of threshold (see zones.ts).
-import type { Block, Category, Profile, Sport, Step, TriDistance, Workout } from './types.ts';
+import type { Block, Category, CourseDemands, Profile, Sport, Step, TriDistance, Workout } from './types.ts';
 import { measure } from './zones.ts';
 
 type X = Partial<Step>;
@@ -12,8 +12,9 @@ const secsOf = (b: Block[]) => b.reduce((t, x) => t + x.repeat * x.steps.reduce(
 const round5 = (min: number) => Math.max(5, Math.round(min / 5) * 5);
 
 export function fuel(dur: number, hard: boolean): string {
-  if (dur >= 150) return 'Fuel: 80–100 g carbohydrate/h (glucose + fructose), 500–750 ml/h with sodium. Rehearse race nutrition.';
-  if (dur >= 75 || (hard && dur >= 60)) return 'Fuel: 60–90 g carbohydrate/h from the first 20 min; start well fed.';
+  const h = dur / 60, tot = (lo: number, hi: number) => `about ${Math.round((lo * h) / 5) * 5}–${Math.round((hi * h) / 5) * 5} g`;
+  if (dur >= 150) return `Fuel: 80–100 g carbohydrate/h (glucose + fructose) — ${tot(80, 100)} for this session — and 500–750 ml/h with sodium. Rehearse race nutrition.`;
+  if (dur >= 75 || (hard && dur >= 60)) return `Fuel: 60–90 g carbohydrate/h from the first 20 min (${tot(60, 90)} in total); start well fed.`;
   return hard ? 'Fuel: carbohydrate-rich meal 2–3 h before; this session needs glycogen.' : 'Fuel: water/electrolytes is enough; eat normally afterwards.';
 }
 
@@ -124,6 +125,30 @@ export const bike = {
     return make('bike', 'bike.racepace', `Race pace ${setName(row)}`, 'racepace', true,
       assemble(dur, bWu(), [blk('Race pace', row[0], [S('work', row[1], s.lo, s.hi, { cue: 'Aero position race effort' }), S('recovery', row[2], 0.55, 0.6)])], bCd(5), bZ2),
       `Target ${s.label} power in the aero position, on race equipment, taking race nutrition. Specificity over heroics.`, p);
+  },
+
+  /** Race-specific session built from the target course: its climbs become the intervals. */
+  course: (dur: number, lvl: number, p: Profile, d: TriDistance, c: CourseDemands) => {
+    const climbs = c.climbMin.filter((m) => m >= 4);
+    if (climbs.length && c.terrain !== 'flat') {
+      const mid = [...climbs].sort((a, b) => a - b)[climbs.length >> 1];
+      const secs = Math.round(Math.max(5, Math.min(25, mid))) * 60;
+      const cf = Math.max(0.8, Math.min(1.05, c.climbFrac));
+      const budget = dur * 60 - 1500;
+      const reps = Math.max(2, Math.min(climbs.length + (lvl >= 2 ? 1 : 0), 2 + lvl, 6, Math.floor(budget / (secs * 1.5))));
+      return make('bike', 'bike.course', `Course climbs ${reps}×${secs / 60} min`, 'racepace', true,
+        assemble(dur, bWu(), [bPrimer, blk('Course climb', reps, [S('work', secs, cf - 0.03, cf + 0.02, { cue: 'Climb at race power seated', cadence: 75 }), S('recovery', Math.round(secs / 2 / 60) * 60, 0.5, 0.6, { cue: 'Descend and reset' })])], bCd(), bZ2),
+        `Your race course has ${climbs.length} climb${climbs.length === 1 ? '' : 's'} of around ${Math.round(mid)} min. These reps are those climbs at the power your pacing plan calls for, on the gearing and cadence you will race. Ride them on a real climb when you can.`, p);
+    }
+    if (c.terrain === 'rolling') {
+      const rp = { sprint: 0.97, olympic: 0.92, half: 0.82, full: 0.71 }[d];
+      const sets = Math.max(2, Math.min(2 + Math.floor(lvl / 2), 4, Math.floor((dur * 60 - 1320) / 1260)));
+      const roller = [S('work', 90, rp + 0.1, rp + 0.16, { cue: 'Roller push over the top' }), S('work', 150, rp - 0.08, rp - 0.03, { cue: 'Settle to race power' })];
+      return make('bike', 'bike.course', `Rolling course ${sets}×16 min`, 'racepace', true,
+        assemble(dur, bWu(), [blk('Rollers', sets, [...roller, ...roller, ...roller, ...roller, S('recovery', 300, 0.55, 0.6)])], bCd(), bZ2),
+        'Your race course rolls constantly. This rehearses surging over each rise and settling straight back to race power without a recovery — the skill that keeps normalised power honest on that terrain.', p);
+    }
+    return bike.racepace(dur, lvl, p, d);
   },
 
   long: (dur: number, lvl: number, p: Profile, phase: string, d: TriDistance) => {

@@ -4,13 +4,15 @@ import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 import { Store } from './store.ts';
-import { addDays, localToday } from './engine/dates.ts';
+import { addDays, localToday, mondayOf } from './engine/dates.ts';
 import { applyReadiness, customWorkout, ensureHorizon, generate, reconcile, toIcs, uid, viewState } from './engine/plan.ts';
 import { assessReadiness } from './engine/readiness.ts';
 import { applyAdaptations, proposeAdaptations } from './engine/adapt.ts';
+import { analyzeExecution, applyProgress, plannedReps } from './engine/execution.ts';
+import { buildLeg } from './engine/course.ts';
 import { Intervals, IntervalsError, racesFrom, thresholdsFrom } from './intervals.ts';
 import type { Session } from './engine/types.ts';
-import { chatView, COACH_MODEL, coachConfigured, CoachError, coachTurn } from './coach.ts';
+import { chatView, COACH_MODEL, coachConfigured, CoachError, coachTurn, DEBRIEF_PROMPT } from './coach.ts';
 
 const ROOT = join(import.meta.dirname, '..');
 const PUBLIC = join(ROOT, 'public');
@@ -24,12 +26,12 @@ class HttpError extends Error {
   constructor(status: number, message: string) { super(message); this.status = status; }
 }
 
-async function body(req: IncomingMessage): Promise<any> {
+async function body(req: IncomingMessage, max = 1_000_000): Promise<any> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const c of req) {
     size += c.length;
-    if (size > 1_000_000) throw new HttpError(413, 'Request too large');
+    if (size > max) throw new HttpError(413, 'Request too large');
     chunks.push(c);
   }
   if (!chunks.length) return {};
@@ -104,12 +106,25 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       if (!s().races.some((x) => x.date === r.date)) { s().races.push({ id: uid('r'), ...r }); importedRaces++; }
     }
     const matched = reconcile(s());
+    // Grade recently completed key sessions rep by rep; each activity is fetched once.
+    let graded = 0;
+    for (const x of s().sessions) {
+      const id = x.actual?.activityId;
+      if (!id || x.actual!.exec || x.date < addDays(t, -21) || graded >= 12 || !plannedReps(x, s().profile).length) continue;
+      try {
+        const exec = analyzeExecution(x, await api.activityIntervals(id), s().profile);
+        if (!exec) continue;
+        x.actual!.exec = exec;
+        applyProgress((s().progress ??= {}), x.workout.code, exec);
+        graded++;
+      } catch (e) { if (!(e instanceof IntervalsError)) throw e; }
+    }
     const adapted = s().profile.autoAdapt ? applyAdaptations(s(), t) : [];
     s().intervals.lastSync = new Date().toISOString();
     s().intervals.lastError = undefined;
     return {
       thresholdsUpdated: updated, activities: s().activities.length, added: Math.max(0, s().activities.length - before),
-      matched, adapted, importedRaces, historyFrom: s().intervals.historyFrom, hidden: s().intervals.hidden ?? 0,
+      matched, graded, adapted, importedRaces, historyFrom: s().intervals.historyFrom, hidden: s().intervals.hidden ?? 0,
     };
   }
 
@@ -129,6 +144,17 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       try { return { ok: true, ...(await coachTurn(s(), today(), message)) }; } finally { busy = false; }
     },
     'DELETE /api/coach': async () => { s().coach.messages = []; return { ok: true }; },
+    // A written review of the week just finished, produced by the coach on request.
+    'POST /api/coach/debrief': async () => {
+      if (busy) throw new HttpError(409, 'The coach is still answering your previous message.');
+      busy = true;
+      try {
+        const t = today();
+        const r = await coachTurn(s(), t, DEBRIEF_PROMPT);
+        s().debrief = { week: mondayOf(t), text: r.reply, at: new Date().toISOString() };
+        return { ok: true, ...r };
+      } finally { busy = false; }
+    },
     'PUT /api/coach/key': async (req) => {
       const key = String((await body(req)).apiKey ?? '').trim();
       s().coach.apiKey = key || undefined;
@@ -154,7 +180,7 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
         maxWeeklyHours: num(b.maxWeeklyHours, 3, 35) ?? p.maxWeeklyHours,
         currentWeeklyHours: Math.max(0, Math.min(35, Number(b.currentWeeklyHours ?? p.currentWeeklyHours) || 0)),
         limiter: pickOf(b.limiter, ['none', 'swim', 'bike', 'run'], p.limiter),
-        ramp: pickOf(b.ramp, ['conservative', 'moderate', 'aggressive'], p.ramp),
+        ramp: pickOf(b.ramp, ['conservative', 'moderate', 'aggressive', 'learned'], p.ramp),
         recoveryCycle: pickOf(b.recoveryCycle, ['auto', '3:1', '2:1'], p.recoveryCycle),
         restDay: b.restDay === undefined ? p.restDay : !!b.restDay,
         comeback: {
@@ -188,11 +214,61 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       const b = await body(req);
       if (!Array.isArray(b)) throw new HttpError(400, 'Expected a list');
       const types = ['sprint', 'olympic', 'half', 'full', 'duathlonSprint', 'duathlon', 'aquathlon', 'run10k', 'halfMarathon', 'marathon', 'bikeEvent', 'other'];
+      const prev = new Map(s().races.map((r) => [r.id, r]));
       s().races = b.filter((r: any) => isDate(r?.date) && r?.name).slice(0, 40).map((r: any) => ({
+        // Course and target splits are edited separately and must survive a save of the list.
+        course: prev.get(r.id)?.course, podium: prev.get(r.id)?.podium,
         id: r.id || uid('r'), name: String(r.name).slice(0, 80), date: r.date,
         type: types.includes(r.type) ? r.type : 'olympic', priority: ['A', 'B', 'C'].includes(r.priority) ? r.priority : 'B',
         goal: r.goal ? String(r.goal).slice(0, 200) : undefined, notes: r.notes ? String(r.notes).slice(0, 500) : undefined,
       }));
+      return { ok: true };
+    },
+
+    // Course (GPX tracks parsed in the browser, sent as [lat, lon, ele] points), conditions and target splits.
+    'PUT /api/races/:id': async (req, id) => {
+      const b = await body(req, 4_000_000);
+      const race = s().races.find((r) => r.id === id);
+      if (!race) throw new HttpError(404, 'Race not found');
+      const c = { ...(race.course ?? {}) };
+      const num = (v: any, lo: number, hi: number) => (v === null || v === '' || v === undefined || !Number.isFinite(Number(v)) ? undefined : Math.max(lo, Math.min(hi, Number(v))));
+      const track = (pts: any) => {
+        if (!Array.isArray(pts) || pts.length < 2 || pts.length > 20000) throw new HttpError(400, 'The GPX track could not be read.');
+        try { return buildLeg(pts.map((q: any) => [Number(q[0]), Number(q[1]), Number(q[2])])); } catch (e: any) { throw new HttpError(400, e.message); }
+      };
+      if (b.bikePoints) c.bike = track(b.bikePoints);
+      if (b.runPoints) c.run = track(b.runPoints);
+      if (b.clearBike) delete c.bike;
+      if (b.clearRun) delete c.run;
+      if ('cda' in b) c.cda = num(b.cda, 0.15, 0.5);
+      if ('bikeKg' in b) c.bikeKg = num(b.bikeKg, 5, 20);
+      if ('tempC' in b) c.tempC = num(b.tempC, -5, 45);
+      if ('transitionMin' in b) c.transitionMin = num(b.transitionMin, 0, 30);
+      if ('wetsuit' in b) c.wetsuit = !!b.wetsuit;
+      race.course = Object.values(c).some((v) => v !== undefined && v !== false) ? c : undefined;
+      if (b.podium) {
+        const p = { swim: num(b.podium.swim, 60, 86400), bike: num(b.podium.bike, 60, 86400), run: num(b.podium.run, 60, 86400), total: num(b.podium.total, 60, 172800) };
+        race.podium = Object.values(p).some((v) => v !== undefined) ? p : undefined;
+      }
+      return { ok: true };
+    },
+
+    'POST /api/niggles': async (req) => {
+      const b = await body(req);
+      const area = String(b.area ?? '').trim().slice(0, 40);
+      if (!area) throw new HttpError(400, 'Say where it is');
+      (s().niggles ??= []).push({
+        id: uid('n'), date: today(), area, sport: ['run', 'bike', 'swim'].includes(b.sport) ? b.sport : 'run',
+        severity: [1, 2, 3].includes(Number(b.severity)) ? Number(b.severity) as 1 | 2 | 3 : 1, note: b.note ? String(b.note).slice(0, 200) : undefined,
+      });
+      return { ok: true };
+    },
+    'PATCH /api/niggles/:id': async (req, id) => {
+      const b = await body(req);
+      const n = (s().niggles ?? []).find((x) => x.id === id);
+      if (!n) throw new HttpError(404, 'Not found');
+      if ([1, 2, 3].includes(Number(b.severity))) n.severity = Number(b.severity) as 1 | 2 | 3;
+      if (b.resolved) n.resolved = today();
       return { ok: true };
     },
 

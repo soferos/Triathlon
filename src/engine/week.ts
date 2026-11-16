@@ -30,13 +30,19 @@ const newId = () => `s${Date.now().toString(36)}${(seq++).toString(36)}${Math.ra
 
 export interface WeekResult { sessions: Session[]; warnings: string[] }
 
-export function buildWeek(week: SeasonWeek, profile: Profile, availability: Availability): WeekResult {
+/**
+ * @param progress per-workout-type level offsets earned (or lost) through execution, e.g. { 'bike.vo2': 1 }
+ */
+export function buildWeek(week: SeasonWeek, profile: Profile, availability: Availability, progress: Record<string, number> = {}): WeekResult {
   const warnings: string[] = [];
   const p = profile;
   const d = week.targetType;
   const phase = week.phase;
   const lvl = week.loadIdx;
   const easyWeek = week.recovery || phase === 'transition';
+  /** Progression level for one workout type: calendar position plus what execution has earned. */
+  const L = (code: string, base = lvl) => Math.max(0, base + (progress[code] ?? 0));
+  const course = week.course;
   const comeback = p.comeback.active;
 
   // ---------- days ----------
@@ -141,21 +147,21 @@ export function buildWeek(week: SeasonWeek, profile: Profile, availability: Avai
     if (phase === 'rebuild') {
       if (intensityOK) bikeSpecs.push(['key', 'Sweet spot (intro)', true, 1.3, 55, 75, (m) => bike.sweetspot(m, Math.max(0, lvl - 1), p)]);
     } else if (phase === 'base') {
-      bikeSpecs.push(['key', 'Sweet spot', true, 1.4, 60, 100, (m) => bike.sweetspot(m, lvl, p)]);
+      bikeSpecs.push(['key', 'Sweet spot', true, 1.4, 60, 100, (m) => bike.sweetspot(m, L('bike.sweetspot'), p)]);
       if (nBike >= 4) bikeSpecs.push(altWeek
         ? ['key', 'VO2 touch', true, 1.2, 60, 75, (m) => bike.vo2(m, 0, p)]
         : ['easy', 'Endurance + sprints', false, 1.2, 60, 90, (m) => bike.endurance(m, 1, p)]);
     } else if (phase === 'build') {
       if (longCourse) {
-        bikeSpecs.push(['key', 'Threshold', true, 1.4, 65, 100, (m) => (altWeek ? bike.overunder(m, lvl, p) : bike.threshold(m, lvl, p))]);
-        bikeSpecs.push(['key', 'VO2max', true, 1.3, 60, 80, (m) => bike.vo2(m, lvl, p)]);
+        bikeSpecs.push(['key', 'Threshold', true, 1.4, 65, 100, (m) => (altWeek ? bike.overunder(m, L('bike.overunder'), p) : bike.threshold(m, L('bike.threshold'), p))]);
+        bikeSpecs.push(['key', 'VO2max', true, 1.3, 60, 80, (m) => bike.vo2(m, L('bike.vo2'), p)]);
       } else {
-        bikeSpecs.push(['key', 'VO2max', true, 1.3, 60, 80, (m) => bike.vo2(m, lvl, p)]);
-        bikeSpecs.push(['key', 'Threshold', true, 1.4, 65, 95, (m) => (altWeek ? bike.overunder(m, lvl, p) : bike.threshold(m, lvl, p))]);
+        bikeSpecs.push(['key', 'VO2max', true, 1.3, 60, 80, (m) => bike.vo2(m, L('bike.vo2'), p)]);
+        bikeSpecs.push(['key', 'Threshold', true, 1.4, 65, 95, (m) => (altWeek ? bike.overunder(m, L('bike.overunder'), p) : bike.threshold(m, L('bike.threshold'), p))]);
       }
     } else if (phase === 'specific') {
-      bikeSpecs.push(['key', 'Race pace', true, 1.6, 70, longCourse ? 150 : 100, (m) => bike.racepace(m, lvl, p, d)]);
-      bikeSpecs.push(['key', longCourse ? 'Threshold' : 'VO2max', true, 1.3, 60, 85, (m) => (longCourse ? bike.threshold(m, 2 + lvl, p) : bike.vo2(m, 2 + lvl, p))]);
+      bikeSpecs.push(['key', 'Race pace', true, 1.6, 70, longCourse ? 150 : 100, (m) => (course ? bike.course(m, L('bike.course'), p, d, course) : bike.racepace(m, L('bike.racepace'), p, d))]);
+      bikeSpecs.push(['key', longCourse ? 'Threshold' : 'VO2max', true, 1.3, 60, 85, (m) => (longCourse ? bike.threshold(m, L('bike.threshold', 2 + lvl), p) : bike.vo2(m, L('bike.vo2', 2 + lvl), p))]);
     } else if (phase === 'taper') {
       bikeSpecs.push(['key', 'Race pace (short)', true, 1.4, 55, 80, (m) => bike.racepace(m, 1, p, d)]);
     }
@@ -178,12 +184,12 @@ export function buildWeek(week: SeasonWeek, profile: Profile, availability: Avai
     if (phase === 'rebuild') {
       // strides only; run intensity returns last because impact tolerance lags aerobic fitness
     } else if (phase === 'base') {
-      runSpecs.push(['key', lvl < 3 ? 'Hill reps' : 'Tempo', true, 1.4, 50, 75, (m) => (lvl < 3 ? run.hills(m, lvl, p) : run.tempo(m, lvl - 3, p))]);
+      runSpecs.push(['key', lvl < 3 ? 'Hill reps' : 'Tempo', true, 1.4, 50, 75, (m) => (lvl < 3 ? run.hills(m, L('run.hills'), p) : run.tempo(m, L('run.tempo', lvl - 3), p))]);
     } else if (phase === 'build') {
-      runSpecs.push(['key', 'Threshold', true, 1.4, 55, 80, (m) => run.threshold(m, lvl, p)]);
-      if (nRun >= 5 && !longCourse) runSpecs.push(['key', 'VO2max', true, 1.3, 55, 70, (m) => run.vo2(m, lvl, p)]);
+      runSpecs.push(['key', 'Threshold', true, 1.4, 55, 80, (m) => run.threshold(m, L('run.threshold'), p)]);
+      if (nRun >= 5 && !longCourse) runSpecs.push(['key', 'VO2max', true, 1.3, 55, 70, (m) => run.vo2(m, L('run.vo2'), p)]);
     } else if (phase === 'specific') {
-      runSpecs.push(['key', longCourse ? 'Threshold' : 'VO2max', true, 1.4, 55, 80, (m) => (longCourse ? run.threshold(m, 2 + lvl, p) : run.vo2(m, 1 + lvl, p))]);
+      runSpecs.push(['key', longCourse ? 'Threshold' : 'VO2max', true, 1.4, 55, 80, (m) => (course?.runHilly && altWeek ? run.hills(m, L('run.hills', 1 + lvl), p) : longCourse ? run.threshold(m, L('run.threshold', 2 + lvl), p) : run.vo2(m, L('run.vo2', 1 + lvl), p))]);
     } else if (phase === 'taper') {
       runSpecs.push(['key', 'Threshold (short)', true, 1.3, 45, 60, (m) => run.threshold(m, 1, p)]);
     }
@@ -204,7 +210,7 @@ export function buildWeek(week: SeasonWeek, profile: Profile, availability: Avai
     } else if (week.testWeek && i === 0) {
       add('swim', 'test', 'CSS test', true, 1, 45, 55, (m) => swim.test(m, 0, p));
     } else if (i === 0 && hardOK) {
-      add('swim', 'key', 'CSS threshold', true, 1.2, 35, 75, (m) => swim.css(m, lvl, p));
+      add('swim', 'key', 'CSS threshold', true, 1.2, 35, 75, (m) => swim.css(m, L('swim.css'), p));
     } else if (i === 1) {
       add('swim', 'easy', 'Swim endurance', false, 1.1, 30, 80, (m) => swim.endurance(m, lvl, p, easyWeek ? 'base' : phase));
     } else if (i === 2 && hardOK && phase !== 'base') {
@@ -388,9 +394,15 @@ export function buildWeek(week: SeasonWeek, profile: Profile, availability: Avai
   for (const f of fixed) {
     sessions.push({ id: newId(), date: addDays(week.start, f.day), sport: 'race', role: 'race', workout: f.workout, status: 'planned', locked: false, origin: 'plan' });
   }
+  // Hot race: use the easy sessions of the final three weeks for heat acclimation (10-14 days is enough).
+  const heat = !!course?.hot && week.weeksOut != null && week.weeksOut >= 1 && week.weeksOut <= 3;
   days.forEach((day, i) => {
     for (const s of [...day.specs].sort((a, b) => rank(a) - rank(b))) {
-      sessions.push({ id: newId(), date: addDays(week.start, i), sport: s.sport, role: s.role, workout: s.make(s.dur), status: 'planned', locked: false, origin: 'plan' });
+      const workout = s.make(s.dur);
+      if (heat && !workout.hard && (s.sport === 'bike' || s.sport === 'run') && s.role !== 'opener') {
+        workout.notes = `${workout.notes ?? ''} Heat acclimation: do this one hot — midday, overdressed, or indoors without a fan — or add 20–30 min of sauna or a hot bath straight after. Keep it easy, expect heart rate 5–10 bpm higher, and replace fluid and sodium.`.trim();
+      }
+      sessions.push({ id: newId(), date: addDays(week.start, i), sport: s.sport, role: s.role, workout, status: 'planned', locked: false, origin: 'plan' });
     }
   });
   sessions.sort((a, b) => a.date.localeCompare(b.date));

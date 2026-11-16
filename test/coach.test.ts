@@ -133,3 +133,14 @@ test('coach tools: replace, add, skip, availability + replan, and helpful errors
   assert.throws(() => runTool(s, TODAY, 'move_session', { id: target.id, date: 'Sunday' }, changes), /ISO date/);
   assert.match(runTool(s, TODAY, 'get_history', { from: '2020-01-01', to: TODAY }, changes), /No imported activities/);
 });
+
+test('weekly debrief is written by the coach and stored for the week', async () => {
+  await api('PUT', '/api/coach/key', { apiKey: 'sk-test' });
+  const r = await api('POST', '/api/coach/debrief', {});
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const sent = claude.requests.at(-2).messages.at(-1).content;
+  assert.match(sent[1].text, /weekly debrief/);
+  const { data } = await api('GET', '/api/state');
+  assert.equal(data.debrief.week, '2026-11-09');
+  assert.ok(data.debrief.text.length > 5);
+});

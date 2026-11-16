@@ -33,7 +33,9 @@ export interface Profile {
   /** Average weekly training hours over the last ~4 weeks; seeds fitness when no Intervals.icu data */
   currentWeeklyHours: number;
   limiter: 'none' | 'swim' | 'bike' | 'run';
-  ramp: 'conservative' | 'moderate' | 'aggressive';
+  ramp: 'conservative' | 'moderate' | 'aggressive' | 'learned';
+  /** CTL points/week this athlete has sustained historically (set from history on each re-plan) */
+  learnedRamp?: number;
   recoveryCycle: 'auto' | '3:1' | '2:1';
   restDay: boolean;
   comeback: { active: boolean; weeksOff: number; resumedOn?: string; note?: string };
@@ -59,6 +61,57 @@ export interface Race {
   priority: Priority;
   goal?: string;
   notes?: string;
+  course?: RaceCourse;
+  /** Split times (seconds) that reach the athlete's target placing, e.g. last year's AG podium */
+  podium?: { swim?: number; bike?: number; run?: number; total?: number };
+}
+
+export interface Climb { startKm: number; km: number; gain: number; grade: number }
+export interface CourseLeg {
+  km: number;
+  gain: number;
+  /** Downsampled elevation profile: distance (km), elevation (m) */
+  profile: [number, number][];
+  climbs: Climb[];
+}
+export interface RaceCourse {
+  bike?: CourseLeg;
+  run?: CourseLeg;
+  /** Aerodynamic drag area in race position (m^2) and bike + kit weight (kg) */
+  cda?: number;
+  bikeKg?: number;
+  tempC?: number;
+  transitionMin?: number;
+  wetsuit?: boolean;
+}
+/** What the target course asks for, used to shape specific-phase training */
+export interface CourseDemands {
+  terrain: 'flat' | 'rolling' | 'hilly';
+  /** Durations (min) of the main climbs at race power, longest first */
+  climbMin: number[];
+  /** Climb power as a fraction of FTP */
+  climbFrac: number;
+  runHilly: boolean;
+  hot: boolean;
+}
+
+export interface Execution {
+  verdict: 'nailed' | 'over' | 'under' | 'cut short' | 'unstructured';
+  plannedReps: number; doneReps: number;
+  /** Planned and achieved intensity as fractions of threshold */
+  lo: number; hi: number; avg?: number;
+  /** Change in intensity from first to last rep, % */
+  fade?: number;
+  text: string;
+}
+
+export interface Niggle {
+  id: string; date: string; area: string;
+  sport: 'run' | 'bike' | 'swim';
+  /** 1 = aware of it, 2 = alters how I move, 3 = painful */
+  severity: 1 | 2 | 3;
+  note?: string;
+  resolved?: string;
 }
 
 export interface Goal {
@@ -120,6 +173,8 @@ export interface Session {
   actual?: {
     tss?: number; durationMin?: number; activityId?: string; name?: string;
     distanceKm?: number; np?: number; avgHr?: number; intensity?: number;
+    /** Aerobic decoupling (%) and interval-by-interval execution, when Intervals.icu provides them */
+    decoupling?: number; exec?: Execution;
     /** Set when the session was done on a different day than planned */
     plannedDate?: string;
   };
@@ -142,6 +197,9 @@ export interface SeasonWeek {
   targetType: TriDistance;
   /** Actual type of the race being built towards (duathlon / aquathlon shift the discipline mix) */
   targetRace?: RaceType;
+  course?: CourseDemands;
+  /** Weeks until the target race (0 = race week) */
+  weeksOut?: number;
   focus: string;
 }
 
@@ -170,4 +228,6 @@ export interface Activity {
   type?: string;
   /** Normalised power (W), average HR (bpm), intensity factor (0..1.x) when available */
   np?: number; avgHr?: number; intensity?: number;
+  /** Aerobic decoupling, % (power or pace vs heart rate, first half vs second half) */
+  decoupling?: number;
 }

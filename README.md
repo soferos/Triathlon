@@ -69,6 +69,24 @@ the Claude API.
   power/plyometrics → in-season maintenance, for gym or home equipment.
 - **Daily readiness** — 7-day HRV trend against your own baseline, resting HR, sleep, form and a
   subjective check-in. One click shifts or replaces today's session when you are not recovered.
+- **Execution-driven progression** — completed key sessions are graded rep by rep against their
+  targets using the intervals Intervals.icu detects. Beat the targets and the next session of that
+  type skips a level; miss them and it steps back. Long sessions report aerobic decoupling.
+- **Course-aware racing** — upload bike and run GPX files for a race. You get an elevation profile,
+  detected climbs, a physics-based split prediction and a variable-power pacing plan. In the
+  specific block the race-pace bike session becomes the course's climbs (or surge-and-settle work
+  for rolling terrain), hilly run courses add hill reps, and hot races add heat acclimation to the
+  easy sessions of the last three weeks.
+- **Age-group gap** — enter the splits that reach your goal; the app compares them with your
+  predicted splits, shows what 1% of each threshold is worth on that course, and can point the
+  plan's extra training time at the discipline furthest behind.
+- **Comeback tracker** — fitness, volume, best session power and pace, and longest sessions since
+  your return against the 12 months before the break, with the date planned fitness regains it.
+- **Learned progression rate** — your past build blocks, and which of them ended in a sharp drop in
+  training, give a personal CTL-per-week rate you can choose to drive the plan.
+- **Niggle log** — log anything that hurts; severity 2 removes intensity in that sport for four
+  days, severity 3 replaces runs with rides (or drops the session) for a week.
+- **Weekly debrief** — a written review of the last seven days from the coach, on request.
 - **Adapts to what you actually did** — after each sync the app compares done against planned and
   proposes changes to the rest of the week: protect the hard session after a day that went far
   beyond plan, trim easy volume when the week is running over its load target, and reschedule a
@@ -103,7 +121,8 @@ Re-pushing updates workouts in place and removes ones deleted here. Only events 
 ## Layout
 
 ```
-src/engine/   adapt.ts (done-vs-planned adjustments)
+src/engine/   adapt.ts (done-vs-planned adjustments, niggles)  execution.ts (rep grading, progression)
+              course.ts (GPX, split prediction, pacing, age-group gap)  insights.ts (comeback, learned ramp)
               season.ts (periodisation, load)  week.ts (scheduler)  workouts.ts (library)
               strength.ts  readiness.ts  zones.ts (targets, Intervals.icu text)  plan.ts (state)
 src/intervals.ts   Intervals.icu API client
@@ -121,6 +140,10 @@ The training rationale and references are on the app's **Method** page.
   they cannot be imported; the app counts them and tells you. Connect Garmin / Wahoo / Zwift /
   Apple Health directly to Intervals.icu, or bulk-upload your Strava export there, then re-import.
 - The coach is tested against a local fake of the Claude API, not the live service.
+- Split predictions depend on CdA, weight and the fixed race-intensity assumptions in
+  `src/engine/course.ts`; calibrate CdA against a past result before trusting the bike split.
+- Rep grading relies on Intervals.icu's interval detection and field names taken from memory of its
+  API; if a session shows "could not be graded", the activity had no matching laps or intervals.
 
 - The Intervals.icu integration is tested against a local fake of the API, not yet against the live
   service. If a push is rejected, the error from Intervals.icu is shown in the app.

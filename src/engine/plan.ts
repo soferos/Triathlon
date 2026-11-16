@@ -1,6 +1,8 @@
 // Orchestration: owns the persisted state shape, (re)generates the plan, reconciles completed
 // activities, applies readiness-driven adaptations and builds the payload the UI renders.
-import type { Activity, Availability, Checkin, Goal, Profile, Race, SeasonWeek, Session, Sport, Wellness, Workout } from './types.ts';
+import type { Activity, Availability, Checkin, Goal, Niggle, Profile, Race, SeasonWeek, Session, Sport, Wellness, Workout } from './types.ts';
+import { courseDemands, gapAnalysis, predictRace } from './course.ts';
+import { comebackTracker, learnedRamp } from './insights.ts';
 import { addDays, diffDays, mondayOf } from './dates.ts';
 import { buildSeason } from './season.ts';
 import { buildWeek } from './week.ts';
@@ -37,6 +39,10 @@ export interface State {
   coach: { apiKey?: string; messages: unknown[] };
   /** Adaptation proposals the athlete dismissed (cleared when the week rolls over) */
   dismissedAdapt?: string[];
+  /** Level offsets per workout type, earned through execution (see execution.ts) */
+  progress?: Record<string, number>;
+  niggles?: Niggle[];
+  debrief?: { week: string; text: string; at: string };
 }
 
 export const emptyState = (): State => ({
@@ -58,7 +64,17 @@ export function currentCtl(s: State): number | undefined {
  *  - 'week':   also rebuild the rest of the current week from today
  */
 export function generate(s: State, today: string, scope: 'future' | 'week' = 'future'): void {
+  // Keep the athlete's own sustainable ramp current; it is only used when they opt in ('learned').
+  s.profile.learnedRamp = learnedRamp(s.wellness)?.suggested;
   const season = buildSeason({ today, profile: s.profile, availability: s.availability, races: s.races, ctl: currentCtl(s) });
+  // Attach what the target course demands, and how far out the race is, to each week.
+  const demands = new Map(s.races.map((r) => [r.id, courseDemands(r, s.profile)]));
+  for (const w of season.weeks) {
+    const race = s.races.find((r) => r.id === w.targetRaceId);
+    if (!race || race.date < w.start) continue;
+    w.course = demands.get(race.id);
+    w.weeksOut = Math.floor(diffDays(mondayOf(race.date), w.start) / 7);
+  }
   s.season = { ...season, generatedAt: new Date().toISOString() };
   const weekStart = mondayOf(today);
   for (let i = 0; i < Math.min(DETAIL_WEEKS, season.weeks.length); i++) {
@@ -68,7 +84,7 @@ export function generate(s: State, today: string, scope: 'future' | 'week' = 'fu
     const existing = s.sessions.filter(inWeek);
     if (wk.start === weekStart && scope === 'future' && existing.length) continue;
     const keep = existing.filter((x) => x.locked || x.status !== 'planned' || x.date < today);
-    const built = buildWeek(wk, s.profile, s.availability);
+    const built = buildWeek(wk, s.profile, s.availability, s.progress ?? {});
     const fresh = built.sessions.filter((n) => {
       if (n.date < today) return false;
       if (keep.some((k) => k.date === n.date && k.sport === n.sport)) return false;
@@ -106,7 +122,8 @@ export function reconcile(s: State): number {
   const record = (x: Session, a: Activity) => {
     x.actual = {
       tss: a.tss, durationMin: a.durationMin, activityId: a.id, name: a.name,
-      distanceKm: a.distanceKm, np: a.np, avgHr: a.avgHr, intensity: a.intensity, plannedDate: x.actual?.plannedDate,
+      distanceKm: a.distanceKm, np: a.np, avgHr: a.avgHr, intensity: a.intensity, decoupling: a.decoupling,
+      plannedDate: x.actual?.plannedDate, exec: x.actual?.exec,
     };
   };
   // Refresh sessions matched on an earlier sync (the activity may have been edited or re-analysed since).
@@ -280,7 +297,15 @@ export function viewState(s: State, today: string) {
 
   const nextRace = s.races.filter((r) => r.date >= today).sort((a, b) => a.date.localeCompare(b.date))[0];
   return {
-    today, profile: p, availability: s.availability, races: s.races, goals: s.goals,
+    today, profile: p, availability: s.availability, goals: s.goals,
+    races: s.races.map((r) => ({ ...r, analysis: { prediction: predictRace(r, p), gap: gapAnalysis(r, p), demands: courseDemands(r, p) } })),
+    insights: {
+      comeback: comebackTracker(p, s.activities, s.wellness, s.season?.weeks ?? [], today),
+      ramp: learnedRamp(s.wellness),
+      progress: s.progress ?? {},
+    },
+    niggles: (s.niggles ?? []).filter((n) => !n.resolved),
+    debrief: s.debrief ?? null,
     library: s.library.map((l) => ({ id: l.id, workout: renderWorkout(l.workout, p) })),
     season: s.season, sessions, weekStats, weekWarnings: s.weekWarnings,
     readiness, checkin: s.checkins[today] ?? null,

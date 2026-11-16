@@ -14,12 +14,14 @@ import type { State } from './plan.ts';
 type Op =
   | { type: 'scale'; id: string; minutes: number }
   | { type: 'easy'; id: string }
-  | { type: 'move'; id: string; date: string };
+  | { type: 'move'; id: string; date: string }
+  | { type: 'cross'; id: string }
+  | { type: 'skip'; id: string };
 
 export interface Adaptation {
   /** Stable for the same situation, so a dismissal sticks until the situation changes */
   key: string;
-  kind: 'bigday' | 'overload' | 'missed';
+  kind: 'bigday' | 'overload' | 'missed' | 'niggle';
   title: string;
   detail: string;
   /** Human-readable list of what Apply will do */
@@ -84,6 +86,30 @@ export function proposeAdaptations(s: State, today: string): Adaptation[] {
     if (week.some((y) => y.sport === 'race' && diffDays(y.date, d) >= 0 && diffDays(y.date, d) <= 2)) return false;
     return true;
   };
+
+  // ---------- 0. Niggles ----------
+  // Severity 2: no intensity in that sport for four days. Severity 3: none of that sport for a
+  // week — runs become rides (same aerobic work, no impact); rides and swims are dropped.
+  for (const ng of (s.niggles ?? []).filter((x) => !x.resolved && x.severity >= 2)) {
+    const until = addDays(today, ng.severity === 3 ? 6 : 3);
+    const hit = s.sessions.filter((x) => x.sport === ng.sport && isOpen(x) && x.date >= today && x.date <= until && x.origin !== 'adapted' && !touched.has(x.id) && (ng.severity === 3 || x.workout.hard));
+    if (!hit.length) continue;
+    const ops: Op[] = [], actions: string[] = [];
+    for (const x of hit) {
+      touched.add(x.id);
+      if (ng.severity === 2) { ops.push({ type: 'easy', id: x.id }); actions.push(`Replace “${x.workout.name}” on ${day(x.date)} with an easy ${ng.sport}.`); }
+      else if (ng.sport === 'run' && !s.sessions.some((y) => y.date === x.date && y.sport === 'bike' && y.status !== 'skipped')) { ops.push({ type: 'cross', id: x.id }); actions.push(`Replace “${x.workout.name}” on ${day(x.date)} with an easy ride of similar load.`); }
+      else { ops.push({ type: 'skip', id: x.id }); actions.push(`Skip “${x.workout.name}” on ${day(x.date)}.`); }
+    }
+    out.push({
+      key: `niggle:${ng.id}:${ng.severity}:${hit.map((x) => x.id).join(',')}`, kind: 'niggle',
+      title: `Protect your ${ng.area}`,
+      detail: ng.severity === 3
+        ? `You logged pain in your ${ng.area}. No ${ng.sport === 'run' ? 'running' : ng.sport === 'bike' ? 'riding' : 'swimming'} for a week keeps a niggle from becoming an injury; aerobic work continues in the other sports. If it is not clearly better in a week, get it assessed.`
+        : `Your ${ng.area} is altering how you move. Intensity is what turns that into an injury, so the next four days of ${ng.sport} stay easy.`,
+      actions, ops,
+    });
+  }
 
   // ---------- 1. Big day ----------
   const yesterday = addDays(today, -1);
@@ -196,7 +222,16 @@ export function applyAdaptations(s: State, today: string): string[] {
       const x = s.sessions.find((q) => q.id === op.id);
       if (!x) continue;
       const before = x.workout.name;
-      if (op.type === 'move') {
+      if (op.type === 'skip') {
+        x.status = 'skipped';
+        x.adaptedNote = `Skipped: ${a.title.toLowerCase()}.`;
+        changes.push(`Skipped “${before}” on ${day(x.date)}.`);
+      } else if (op.type === 'cross') {
+        const w = bike.endurance(Math.min(90, r5(x.workout.durationMin * 1.2)), 0, s.profile);
+        x.workout = w; x.sport = 'bike'; x.role = 'easy';
+        x.adaptedNote = `Replaced “${before}” with a ride: ${a.title.toLowerCase()}.`;
+        changes.push(`Replaced “${before}” on ${day(x.date)} with “${w.name}”.`);
+      } else if (op.type === 'move') {
         const from = x.date;
         x.date = op.date;
         x.adaptedNote = `Moved from ${day(from)} to ${day(op.date)}: ${a.title.toLowerCase()}.`;
