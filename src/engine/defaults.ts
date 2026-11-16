@@ -16,15 +16,15 @@ export const defaultProfile = (): Profile => ({
   autoAdapt: false,
 });
 
+/** No daily limits: the plan lays out its best week first; the athlete then constrains what they must. */
 export const defaultAvailability = (): Availability => ({
-  days: [
-    { minutes: 60, pool: true, gym: true },
-    { minutes: 90, pool: true, gym: true },
-    { minutes: 120, pool: true, gym: true },
-    { minutes: 90, pool: true, gym: true },
-    { minutes: 60, pool: true, gym: true },
-    { minutes: 300, pool: false, gym: false },
-    { minutes: 180, pool: false, gym: false },
-  ],
+  days: Array.from({ length: 7 }, () => ({ minutes: null, pool: true, gym: true })),
+  fixed: {},
   overrides: {},
 });
+
+/** Minutes a day can hold: a date-specific exception, else the weekly limit, else effectively unlimited. */
+export const UNLIMITED = 600;
+export function dayCap(a: Availability, date: string, weekday: number): number {
+  return a.overrides[date]?.minutes ?? a.days[weekday].minutes ?? UNLIMITED;
+}

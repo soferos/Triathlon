@@ -45,10 +45,25 @@ export interface Profile {
   autoAdapt: boolean;
 }
 
-export interface DayAvailability { minutes: number; pool: boolean; gym: boolean }
+export interface DayAvailability {
+  /** Time limit for the day in minutes; null = no limit (the plan decides what the day should hold) */
+  minutes: number | null;
+  pool: boolean; gym: boolean;
+}
+/** Days of the week (Mon = 0) the athlete has fixed. Anything left unset is the plan's choice. */
+export interface FixedDays {
+  /** Swim on exactly these days (squad sessions, lane bookings) */
+  swim?: number[];
+  /** Strength only on these days */
+  strength?: number[];
+  longRide?: number;
+  longRun?: number;
+  rest?: number;
+}
 export interface Availability {
   /** Monday..Sunday */
   days: DayAvailability[];
+  fixed?: FixedDays;
   /** Date-specific overrides (travel, work, illness): ISO date -> minutes */
   overrides: Record<string, { minutes: number; note?: string }>;
 }

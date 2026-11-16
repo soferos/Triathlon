@@ -10,6 +10,7 @@ import type { Activity, Profile, SeasonWeek, Session, Workout } from './types.ts
 import { addDays, DAY_NAMES, diffDays, dow, mondayOf } from './dates.ts';
 import { bike, run, swim } from './workouts.ts';
 import type { State } from './plan.ts';
+import { dayCap } from './defaults.ts';
 
 type Op =
   | { type: 'scale'; id: string; minutes: number }
@@ -71,7 +72,7 @@ export function proposeAdaptations(s: State, today: string): Adaptation[] {
   const touched = new Set<string>();
   const out: Adaptation[] = [];
 
-  const capOf = (d: string) => s.availability.overrides[d]?.minutes ?? s.availability.days[dow(d)].minutes;
+  const capOf = (d: string) => dayCap(s.availability, d, dow(d));
   const on = (d: string) => week.filter((x) => x.date === d && x.status !== 'skipped');
   const hardOn = (d: string, except?: Session) => on(d).some((x) => x !== except && (x.workout.hard || x.sport === 'race') && x.sport !== 'strength');
   /** Can session x go on date d without breaking capacity or hard/long spacing? */
@@ -79,7 +80,9 @@ export function proposeAdaptations(s: State, today: string): Adaptation[] {
     if (!inWeek(d) || d < today || capOf(d) < 30) return false;
     const there = on(d).filter((y) => y !== x);
     if (there.some((y) => y.sport === x.sport || y.sport === 'race')) return false;
-    if (x.sport === 'swim' && !s.availability.days[dow(d)].pool) return false;
+    const fx = s.availability.fixed ?? {};
+    if (x.sport === 'swim' && !(fx.swim?.length ? fx.swim.includes(dow(d)) : s.availability.days[dow(d)].pool)) return false;
+    if (fx.rest === dow(d)) return false;
     if (there.reduce((t, y) => t + y.workout.durationMin, 0) + x.workout.durationMin > capOf(d) + 10) return false;
     if (x.role === 'long' && there.some((y) => y.role === 'long')) return false;
     if (x.workout.hard && (hardOn(d, x) || hardOn(addDays(d, -1), x) || hardOn(addDays(d, 1), x))) return false;
@@ -145,7 +148,10 @@ export function proposeAdaptations(s: State, today: string): Adaptation[] {
   const left = remaining.reduce((t, x) => t + x.workout.tss, 0);
   const projected = done + left;
   const target = wk.targetTss;
-  if (target > 0 && projected > target * 1.12 && remaining.length) {
+  // Only react to load actually done beyond what was planned up to today — never to the plan's own shape.
+  const plannedToDate = week.filter((x) => x.date < today && x.sport !== 'race' && x.status !== 'skipped').reduce((t, x) => t + x.workout.tss, 0);
+  const ahead = done > plannedToDate * 1.1 + 20;
+  if (target > 0 && ahead && projected > target * 1.12 && remaining.length) {
     let excess = projected - target * 1.05;
     const ops: Op[] = [], actions: string[] = [];
     // Easy sessions give up time before the long session does; nothing drops below 60% of its length.

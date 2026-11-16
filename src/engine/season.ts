@@ -3,6 +3,7 @@
 import type { Availability, Phase, Profile, Race, RaceType, SeasonWeek, TriDistance } from './types.ts';
 import { addDays, diffDays, mondayOf } from './dates.ts';
 import { RACE_LOAD } from './workouts.ts';
+import { dayCap } from './defaults.ts';
 
 const TRI: TriDistance[] = ['sprint', 'olympic', 'half', 'full'];
 export function triDistance(t: RaceType | undefined): TriDistance {
@@ -52,10 +53,11 @@ export interface SeasonInput {
 
 export function weekCapacityHours(start: string, a: Availability, restDay = false): number {
   const mins: number[] = [];
-  for (let d = 0; d < 7; d++) mins.push(a.overrides[addDays(start, d)]?.minutes ?? a.days[d].minutes);
+  for (let d = 0; d < 7; d++) mins.push(dayCap(a, addDays(start, d), d));
   let total = mins.reduce((t, m) => t + m, 0);
   // A protected rest day removes the shortest day from usable capacity.
-  if (restDay && mins.every((m) => m >= 30)) total -= Math.min(...mins);
+  if (a.fixed?.rest != null) total -= mins[a.fixed.rest];
+  else if (restDay && mins.every((m) => m >= 30)) total -= Math.min(...mins);
   return total / 60;
 }
 
@@ -192,7 +194,9 @@ export function buildSeason(input: SeasonInput): { weeks: SeasonWeek[]; warnings
     w.ctlEnd = Math.round(ctl * 10) / 10;
   }
   if (weeks.some((w) => !w.recovery && (w.phase === 'build' || w.phase === 'specific') && w.targetHours >= Math.min(profile.maxWeeklyHours, weekCapacityHours(w.start, availability, profile.restDay) * 0.95) - 0.3)) {
-    warnings.push('Your available hours cap the plan in the build/specific phases. More time (or a higher weekly maximum) would allow further progression.');
+    warnings.push(availability.days.some((d) => d.minutes != null)
+      ? 'Your daily limits or weekly maximum cap the plan in the build/specific phases. More time would allow further progression.'
+      : 'Your weekly maximum caps the plan in the build/specific phases. A higher maximum would allow further progression.');
   }
   return { weeks, warnings };
 }

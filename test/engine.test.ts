@@ -66,8 +66,14 @@ test('season: warns when there is too little time, and works with no races', () 
   assert.equal(none.weeks[0].phase, 'base');
 });
 
+/** A working athlete's week with explicit daily limits and weekday-only pool/gym access. */
+const limited = () => ({
+  days: [60, 90, 120, 90, 60, 300, 180].map((minutes, i) => ({ minutes, pool: i < 5, gym: i < 5 })),
+  overrides: {} as Record<string, { minutes: number; note?: string }>,
+});
+
 test('week: respects availability, pool access, rest day and hard-day rules across the season', () => {
-  const p = profile(), a = defaultAvailability();
+  const p = profile(), a = limited();
   a.overrides['2027-02-03'] = { minutes: 0, note: 'travel' };
   const { weeks } = buildSeason({ today: TODAY, profile: p, availability: a, races, ctl: 38 });
   for (const w of weeks) {
@@ -237,4 +243,38 @@ test('duathlon and aquathlon targets: accepted as races and shift the discipline
   assert.equal(raceWeek.swim, 0);
   assert.equal(raceWeek.raceTss, 170);
   assert.equal(mins('aquathlon', 'race').raceTss, 55);
+});
+
+test('availability: with no limits the plan lays out its optimal week; fixed days and limits are then honoured', () => {
+  const p = { ...profile(), comeback: { active: false, weeksOff: 0 }, currentWeeklyHours: 11 };
+  const open = defaultAvailability();
+  assert.ok(open.days.every((d) => d.minutes === null));
+  const wk = (a: ReturnType<typeof defaultAvailability>) => {
+    const { weeks } = buildSeason({ today: TODAY, profile: p, availability: a, races, ctl: 70 });
+    const w = weeks.find((x) => x.phase === 'build' && !x.recovery)!;
+    return { w, ...buildWeek(w, p, a) };
+  };
+  const best = wk(open);
+  const on = (r: { sessions: any[] }, f: (s: any) => boolean) => r.sessions.filter(f).map((s) => dow(s.date));
+  assert.deepEqual(best.warnings, [], 'nothing has to be dropped from an unconstrained week');
+  assert.deepEqual(on(best, (s) => s.role === 'long' && s.sport === 'bike'), [5], 'long ride on Saturday');
+  assert.deepEqual(on(best, (s) => s.role === 'long' && s.sport === 'run'), [6], 'long run on Sunday');
+  assert.ok(!best.sessions.some((s) => dow(s.date) === 0), 'Monday kept free');
+  const tss = best.sessions.reduce((t, s) => t + s.workout.tss, 0);
+  assert.ok(Math.abs(tss - best.w.targetTss) / best.w.targetTss < 0.08, `optimal week hits its load target: ${tss} vs ${best.w.targetTss}`);
+  const byDay = (r: { sessions: any[] }) => { const m = [0, 0, 0, 0, 0, 0, 0]; for (const s of r.sessions) m[dow(s.date)] += s.workout.durationMin; return m; };
+
+  // Fixed days: swims on Mon/Wed/Fri exactly, strength Tue/Thu, long run Saturday, long ride Sunday, rest Thursday.
+  const fixed = wk({ ...open, fixed: { swim: [0, 2, 4], strength: [1, 3], longRun: 5, longRide: 6, rest: 3 } });
+  assert.deepEqual(on(fixed, (s) => s.sport === 'swim').sort(), [0, 2, 4]);
+  assert.ok(on(fixed, (s) => s.sport === 'strength').every((d) => d === 1), 'strength only on a fixed day that is not the rest day');
+  assert.deepEqual(on(fixed, (s) => s.role === 'long' && s.sport === 'run'), [5]);
+  assert.deepEqual(on(fixed, (s) => s.role === 'long' && s.sport === 'bike'), [6]);
+  assert.ok(!fixed.sessions.some((s) => dow(s.date) === 3), 'fixed rest day is empty');
+
+  // Negotiating down: cap Tuesday at 45 min and the day shrinks while the rest of the week absorbs what it can.
+  const capped = wk({ ...open, days: open.days.map((d, i) => (i === 1 ? { ...d, minutes: 45 } : d)) });
+  assert.ok(byDay(best)[1] > 45, 'the optimal Tuesday was longer than the new limit');
+  assert.ok(byDay(capped)[1] <= 45);
+  assert.ok(capped.sessions.length >= best.sessions.length - 2);
 });

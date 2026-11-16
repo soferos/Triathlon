@@ -4,6 +4,7 @@ import type { Availability, Profile, Race, Role, SeasonWeek, Session, Sport, Tri
 import { addDays, diffDays, DAY_NAMES } from './dates.ts';
 import { bike, run, swim, raceWorkout } from './workouts.ts';
 import { strengthBlockFor, strengthWorkout } from './strength.ts';
+import { dayCap, UNLIMITED } from './defaults.ts';
 
 interface Spec {
   sport: Sport; role: Role; hard: boolean;
@@ -13,10 +14,12 @@ interface Spec {
   dur: number;
   /** Must share a day with a bike session (brick) */
   afterBike?: boolean;
+  /** Restrict placement to these weekdays (fixed by the athlete) */
+  only?: number[];
   day?: number;
   label: string;
 }
-interface Day { cap: number; used: number; specs: Spec[]; hard: boolean; pool: boolean; gym: boolean; blocked: boolean; noHard: boolean; long: boolean }
+interface Day { /** No limit set by the athlete */ open: boolean; cap: number; used: number; specs: Spec[]; hard: boolean; pool: boolean; gym: boolean; blocked: boolean; noHard: boolean; long: boolean }
 
 const SPLIT: Record<TriDistance, [number, number, number]> = {
   sprint: [0.22, 0.44, 0.34], olympic: [0.22, 0.45, 0.33], half: [0.2, 0.49, 0.31], full: [0.17, 0.53, 0.3],
@@ -34,6 +37,25 @@ export interface WeekResult { sessions: Session[]; warnings: string[] }
  * @param progress per-workout-type level offsets earned (or lost) through execution, e.g. { 'bike.vo2': 1 }
  */
 export function buildWeek(week: SeasonWeek, profile: Profile, availability: Availability, progress: Record<string, number> = {}): WeekResult {
+  let out = layout(week, profile, availability, progress);
+  // Session lengths are sized from an assumed load per hour; the sessions actually chosen can land
+  // off the week's load target. One corrective pass re-sizes the week so the plan hits its own number.
+  if (week.phase !== 'race' && week.targetTss > 0) {
+    const tss = out.sessions.reduce((t, x) => t + x.workout.tss, 0);
+    const ratio = week.targetTss / Math.max(1, tss);
+    if (ratio < 0.95 || ratio > 1.06) {
+      const again = layout({ ...week, targetHours: Math.round(week.targetHours * Math.max(0.75, Math.min(1.15, ratio)) * 4) / 4 }, profile, availability, progress);
+      const tss2 = again.sessions.reduce((t, x) => t + x.workout.tss, 0);
+      if (Math.abs(tss2 - week.targetTss) < Math.abs(tss - week.targetTss)) out = again;
+    }
+  }
+  // Collapse repeats ("No room for Easy run" three times -> once with a count).
+  const counts = new Map<string, number>();
+  for (const w of out.warnings) counts.set(w, (counts.get(w) ?? 0) + 1);
+  return { sessions: out.sessions, warnings: [...counts].map(([w, n]) => (n > 1 ? `${w} (×${n})` : w)) };
+}
+
+function layout(week: SeasonWeek, profile: Profile, availability: Availability, progress: Record<string, number>): WeekResult {
   const warnings: string[] = [];
   const p = profile;
   const d = week.targetType;
@@ -46,12 +68,20 @@ export function buildWeek(week: SeasonWeek, profile: Profile, availability: Avai
   const comeback = p.comeback.active;
 
   // ---------- days ----------
+  const fx = availability.fixed ?? {};
   const days: Day[] = availability.days.map((a, i) => {
-    const o = availability.overrides[addDays(week.start, i)];
-    return { cap: o ? o.minutes : a.minutes, used: 0, specs: [], hard: false, pool: a.pool, gym: a.gym, blocked: false, noHard: false, long: false };
+    const date = addDays(week.start, i);
+    const cap = dayCap(availability, date, i);
+    return {
+      open: cap >= UNLIMITED, cap, used: 0, specs: [], hard: false,
+      // A fixed swim/strength day implies pool/gym access on that day.
+      pool: fx.swim?.length ? fx.swim.includes(i) : a.pool, gym: fx.strength?.length ? fx.strength.includes(i) : a.gym,
+      blocked: false, noHard: false, long: false,
+    };
   });
   const open = () => days.filter((x) => x.cap >= 30).length;
-  if (p.restDay && open() === 7) {
+  if (fx.rest != null) days[fx.rest].blocked = true;
+  else if (p.restDay && open() === 7) {
     // Protect one full rest day: the day with the least time, preferring Monday then Friday.
     const order = [0, 4, 1, 2, 3, 5, 6];
     const rest = order.reduce((best, i) => (days[i].cap < days[best].cap ? i : best), order[0]);
@@ -109,10 +139,13 @@ export function buildWeek(week: SeasonWeek, profile: Profile, availability: Avai
   else if (duathlon) nSwim = Math.min(nSwim, 1);
   if (phase === 'transition') nSwim = 1;
   nSwim = Math.min(nSwim, poolDays, Math.max(1, Math.floor((total * fs) / 30)));
+  // Fixed swim days are commitments (squad, lane booking): swim on each of them in normal training weeks.
+  const fixedSwim = !!fx.swim?.length && phase !== 'race' && phase !== 'transition' && !duathlon;
+  if (fixedSwim) nSwim = Math.min(poolDays, 5);
   if (poolDays === 0 && nSwim === 0 && duathlon) { fr += fs; fs = 0; }
   else if (poolDays === 0) {
     nSwim = 0;
-    warnings.push(`Week of ${week.start}: no pool access on any available day — swim time moved to bike/run.`);
+    warnings.push(`No pool access on any available day — swim time moved to bike/run.`);
     fb += fs * 0.6; fr += fs * 0.4; fs = 0;
   }
   let nBike = hours < 6 ? 2 : hours < 10.5 ? 3 : hours < 15 ? 4 : 5;
@@ -209,11 +242,11 @@ export function buildWeek(week: SeasonWeek, profile: Profile, availability: Avai
         i === 0 ? (m) => swim.endurance(m, 0, p, 'race') : (m) => swim.openers(m, 0, p));
     } else if (week.testWeek && i === 0) {
       add('swim', 'test', 'CSS test', true, 1, 45, 55, (m) => swim.test(m, 0, p));
-    } else if (i === 0 && hardOK) {
+    } else if (i === 0 && hardOK && (phase !== 'rebuild' || lvl >= 2)) {
       add('swim', 'key', 'CSS threshold', true, 1.2, 35, 75, (m) => swim.css(m, L('swim.css'), p));
     } else if (i === 1) {
       add('swim', 'easy', 'Swim endurance', false, 1.1, 30, 80, (m) => swim.endurance(m, lvl, p, easyWeek ? 'base' : phase));
-    } else if (i === 2 && hardOK && phase !== 'base') {
+    } else if (i === 2 && hardOK && phase !== 'base' && phase !== 'rebuild') {
       add('swim', 'key', 'Swim speed', true, 1, 35, 60, (m) => swim.speed(m, lvl, p));
     } else {
       add('swim', 'easy', 'Swim technique', false, 1, 30, 60, (m) => swim.technique(m, lvl, p));
@@ -270,12 +303,17 @@ export function buildWeek(week: SeasonWeek, profile: Profile, availability: Avai
       return b && !day.specs.some((x) => x.sport === 'run') ? 100 + (b.role === 'long' ? (phase === 'build' ? 5 : 0) : 5) : -Infinity;
     }
     if (day.specs.some((x) => x.sport === s.sport)) return -Infinity;
-    if (cnt(day) >= (day.cap >= 240 ? 3 : 2)) return -Infinity;
+    if (s.only && !s.only.includes(i)) return -Infinity;
+    // A day with a time limit holds two endurance sessions (three from 4 h). A day without one holds
+    // a bike and a run plus a swim — the normal shape of a triathlete's double or triple day.
+    if (day.open) {
+      if (s.sport !== 'swim' && day.specs.filter((x) => x.sport === 'bike' || x.sport === 'run').length >= 2) return -Infinity;
+    } else if (cnt(day) >= (day.cap >= 240 ? 3 : 2)) return -Infinity;
     if (s.sport === 'swim' && !day.pool) return -Infinity;
     if (s.hard && day.noHard) return -Infinity;
     let sc = (Math.min(s.dur, remaining) / s.dur) * 10;
     if (s.role === 'long') {
-      sc += day.cap / 60 + (s.sport === 'bike' ? (i === 5 ? 0.6 : i === 6 ? 0.3 : 0) : i === 6 ? 0.5 : 0);
+      sc += Math.min(day.cap, 300) / 60 + (s.sport === 'bike' ? (i === 5 ? 0.6 : i === 6 ? 0.3 : 0) : i === 6 ? 0.5 : i === 5 ? 0.1 : 0);
       if (day.long) sc -= 6;
       if (day.hard) sc -= 3;
       if (s.sport === 'run' && days[i - 1]?.hard) sc -= 1;
@@ -312,11 +350,16 @@ export function buildWeek(week: SeasonWeek, profile: Profile, availability: Avai
       if (sc > bestScore) { best = i; bestScore = sc; }
     }
     if (best < 0) {
-      if (!s.afterBike) warnings.push(`Week of ${week.start}: no room for “${s.label}” (${s.sport}) — add availability${s.sport === 'swim' ? ' or pool access' : ''} to fit it.`);
+      if (!s.afterBike) warnings.push(`No room for “${s.label}” (${s.sport}) — add availability${s.sport === 'swim' ? ' or pool access' : ''} to fit it.`);
       return;
     }
     put(s, best);
   };
+  // Days the athlete fixed.
+  for (const s of specs) {
+    if (s.role === 'long' && s.sport === 'bike' && fx.longRide != null) s.only = [fx.longRide];
+    if (s.role === 'long' && s.sport === 'run' && fx.longRun != null) s.only = [fx.longRun];
+  }
   const placed = new Set<Spec>();
   const runPass = (order: ((s: Spec) => boolean)[]) => {
     for (const sel of order) for (const s of specs) if (!placed.has(s) && sel(s)) { placed.add(s); place(s); }
@@ -339,7 +382,7 @@ export function buildWeek(week: SeasonWeek, profile: Profile, availability: Avai
     for (let i = 0; i < 7; i++) {
       const day = days[i];
       if (day.blocked || day.cap - day.used < 30 || day.specs.some((x) => x.sport === 'strength')) continue;
-      if (p.strengthEquipment === 'gym' && !day.gym) continue;
+      if ((p.strengthEquipment === 'gym' || fx.strength?.length) && !day.gym) continue;
       if (cnt(day) >= 3) continue;
       const nextDay = days[i + 1];
       if (aRaceDay >= 0 && aRaceDay - i <= 3) continue;
@@ -354,7 +397,7 @@ export function buildWeek(week: SeasonWeek, profile: Profile, availability: Avai
       if (sc > bestScore) { best = i; bestScore = sc; }
     }
     if (best < 0) {
-      warnings.push(`Week of ${week.start}: no suitable day for strength session ${k + 1}${p.strengthEquipment === 'gym' ? ' — mark gym access on more days' : ''}.`);
+      warnings.push(`No suitable day for strength session ${k + 1}${p.strengthEquipment === 'gym' ? ' — mark gym access on more days' : ''}.`);
       break;
     }
     const variant = k === 0 ? 'A' : 'B';
@@ -385,7 +428,7 @@ export function buildWeek(week: SeasonWeek, profile: Profile, availability: Avai
     }
   }
   if (deficit > hours * 60 * 0.12 && phase !== 'race') {
-    warnings.push(`Week of ${week.start}: availability fits ${((hours * 60 - deficit) / 60).toFixed(1)} h of the ${hours} h target — add time on some days to hit the planned load.`);
+    warnings.push(`Your daily limits fit ${((hours * 60 - deficit) / 60).toFixed(1)} h of the ${hours} h target — loosen a limit to hit the planned load.`);
   }
 
   // ---------- emit ----------

@@ -121,7 +121,11 @@ export function coachContext(s: State, today: string): string {
   out.push(`Zones — bike: ${z.bike.map((x) => `${x.id} ${x.target}`).join('; ')} | run: ${z.run.map((x) => `${x.id} ${x.target}`).join('; ')} | swim: ${z.swim.map((x) => `${x.id} ${x.target}`).join('; ')}`);
   out.push(`Settings: max ${p.maxWeeklyHours} h/week, progression ${p.ramp}, recovery cycle ${p.recoveryCycle}, limiter ${p.limiter}, strength ${p.strengthEquipment}.`);
   if (p.comeback.active) out.push(`Return to training: ${p.comeback.weeksOff} weeks off${p.comeback.resumedOn ? `, resumed ${p.comeback.resumedOn}` : ''}${p.comeback.note ? `. Athlete's note: ${p.comeback.note}` : ''}`);
-  out.push(`Weekly availability (min): ${s.availability.days.map((d, i) => `${DAY_NAMES[i]} ${d.minutes}${d.pool ? ' pool' : ''}${d.gym ? ' gym' : ''}`).join(', ')}`);
+  out.push(`Daily time limits (min; "open" = no limit set, the plan decides): ${s.availability.days.map((d, i) => `${DAY_NAMES[i]} ${d.minutes ?? 'open'}${d.pool ? ' pool' : ''}${d.gym ? ' gym' : ''}`).join(', ')}`);
+  const fx = s.availability.fixed ?? {};
+  const fixed = [fx.swim?.length && `swims on ${fx.swim.map((d) => DAY_NAMES[d]).join('/')}`, fx.strength?.length && `strength on ${fx.strength.map((d) => DAY_NAMES[d]).join('/')}`,
+    fx.longRide != null && `long ride ${DAY_NAMES[fx.longRide]}`, fx.longRun != null && `long run ${DAY_NAMES[fx.longRun]}`, fx.rest != null && `rest day ${DAY_NAMES[fx.rest]}`].filter(Boolean);
+  if (fixed.length) out.push(`Fixed by the athlete: ${fixed.join(', ')}.`);
   const ov = Object.entries(s.availability.overrides).filter(([d]) => d >= today).slice(0, 12);
   if (ov.length) out.push(`Date exceptions: ${ov.map(([d, v]) => `${d} ${v.minutes} min${v.note ? ` (${v.note})` : ''}`).join(', ')}`);
 
