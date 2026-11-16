@@ -64,6 +64,24 @@ export interface Race {
   course?: RaceCourse;
   /** Split times (seconds) that reach the athlete's target placing, e.g. last year's AG podium */
   podium?: { swim?: number; bike?: number; run?: number; total?: number };
+  /** For a race already done: manual corrections, the thresholds held at the time, and whether it calibrates predictions */
+  result?: RaceResult;
+}
+export interface RaceResult {
+  /** Split overrides in seconds, keyed by leg label (Swim, Bike, Run, Run 1, Run 2); otherwise taken from that day's activities */
+  manual?: Record<string, number>;
+  /** Thresholds at the time of the race; default to what the activities recorded, then to today's */
+  then?: { ftp?: number; runPaceSecPerKm?: number; cssSecPer100?: number };
+  /** Use this race to calibrate future predictions (default true) */
+  use?: boolean;
+}
+/** Race behaviour fitted from the athlete's own results, replacing the generic assumptions */
+export interface RaceModel {
+  cda?: number;
+  /** Fraction of threshold held per leg label, per race type */
+  fracs: Partial<Record<RaceType, Record<string, number>>>;
+  /** Names of the races the model was fitted from */
+  sources: string[];
 }
 
 export interface Climb { startKm: number; km: number; gain: number; grade: number }
@@ -230,4 +248,6 @@ export interface Activity {
   np?: number; avgHr?: number; intensity?: number;
   /** Aerobic decoupling, % (power or pace vs heart rate, first half vs second half) */
   decoupling?: number;
+  /** Exact moving time (s), local start time (HH:MM:SS), and the FTP Intervals.icu held for this activity */
+  secs?: number; time?: string; ftp?: number;
 }

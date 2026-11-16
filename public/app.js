@@ -346,12 +346,13 @@ function vRaces() {
   const sel = (obj, key, opts) => h('select', { onchange: (e) => (obj[key] = e.target.value) }, Object.entries(opts).map(([v, l]) => h('option', { value: v, selected: obj[key] === v }, l)));
   const del = (list, i) => h('button', { class: 'btn sm danger', onclick: () => { list.splice(i, 1); render(); } }, '✕');
   return [
-    page('Races & goals', 'A-races shape the whole season. B-races get a short freshen-up. C-races are trained through.'),
+    page('Races & goals', 'A-races shape the whole season. B-races get a short freshen-up. C-races are trained through. Add past races too: their results calibrate your predictions.'),
     card('Race calendar',
       h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['Race', 'Date', 'Type', 'Priority', 'Goal', 'Course', ''].map((c) => h('th', {}, c)))),
         h('tbody', {}, races.map((r, i) => h('tr', {}, h('td', {}, inp(r, 'name', { placeholder: 'Race name' })), h('td', {}, inp(r, 'date', { type: 'date' })), h('td', {}, sel(r, 'type', RACE_TYPES)),
           h('td', {}, sel(r, 'priority', { A: 'A', B: 'B', C: 'C' })), h('td', {}, inp(r, 'goal', { placeholder: 'e.g. sub 4:30, AG podium' })),
-          h('td', {}, r.id && S.races.some((x) => x.id === r.id) ? h('button', { class: 'btn sm', onclick: () => courseDialog(r.id) }, r.course || r.podium ? 'Course & targets ✓' : 'Course & targets') : h('span', { class: 'muted small' }, 'save first')),
+          h('td', {}, r.id && S.races.some((x) => x.id === r.id) ? h('span', { class: 'row', style: 'flex-wrap:nowrap' }, h('button', { class: 'btn sm', onclick: () => courseDialog(r.id) }, r.course || r.podium ? 'Course ✓' : 'Course & targets'),
+            r.date < S.today && h('button', { class: 'btn sm primary', onclick: () => resultDialog(r.id) }, 'Result')) : h('span', { class: 'muted small' }, 'save first')),
           h('td', {}, del(races, i))))))),
       h('div', { class: 'row', style: 'margin-top:10px' },
         btn('Add race', () => { races.push({ name: '', date: addDays(S.today, 120), type: 'half', priority: 'A' }); render(); }),
@@ -599,6 +600,7 @@ function courseDialog(id) {
     h('div', { class: 'form' }, field('Swim', inp('swim', { placeholder: '0:29:30' })), field('Bike', inp('bike', { placeholder: '2:18:00' })), field('Run', inp('run', { placeholder: '1:24:00' })), field('Total', inp('total', { placeholder: '4:18:00' }))),
     h('div', { style: 'margin:12px 0' }, btn('Save', () => save(), 'primary')),
     pr && [h('h3', {}, 'Prediction on current thresholds'),
+      S.raceModel && h('p', { class: 'muted small' }, `Calibrated from ${S.raceModel.sources.join(', ')}${S.raceModel.cda && !c.cda ? ` — CdA ${S.raceModel.cda}` : ''}${S.raceModel.fracs[r.type] ? ', with the intensities you actually held at this distance' : ''}.`),
       pr.missing.length ? h('div', { class: 'notice' }, `Missing: ${pr.missing.join(', ')} — set them in Profile for a full prediction.`) : null,
       h('table', {}, h('thead', {}, h('tr', {}, ['Leg', 'Distance', 'Predicted', 'Target', 'Gap', 'Basis'].map((x) => h('th', {}, x)))), h('tbody', {},
         pr.legs.map((l) => { const g = gap?.rows.find((q) => q.sport === l.sport && pr.legs.filter((z) => z.sport === l.sport).length === 1);
@@ -617,6 +619,62 @@ function courseDialog(id) {
       [a.demands.climbMin.length && a.demands.terrain !== 'flat' ? `the race-pace bike session in the specific block becomes reps of about ${Math.round([...a.demands.climbMin].sort((x, y) => x - y)[a.demands.climbMin.length >> 1])} min at ${Math.round(a.demands.climbFrac * 100)}% FTP, matching the course’s climbs` : a.demands.terrain === 'rolling' ? 'the race-pace bike session becomes surge-and-settle work for rolling terrain' : 'steady race-power work for a flat course',
         a.demands.runHilly && 'hill reps alternate with the key run', a.demands.hot && 'easy sessions in the last three weeks carry heat-acclimation instructions'].filter(Boolean).join('; ') + '.'),
   ]);
+}
+// A race already run: actual splits against the model, and what it says about how you race.
+function resultDialog(id) {
+  const r = S.races.find((x) => x.id === id);
+  const a = r?.result_analysis;
+  if (!r || !a) return;
+  const res = r.result || {};
+  const f = { manual: Object.fromEntries(a.legs.map((l) => [l.label, res.manual?.[l.label] ? hms(res.manual[l.label]) : ''])), total: res.manual?.Total ? hms(res.manual.Total) : '',
+    ftp: res.then?.ftp ?? '', run: res.then?.runPaceSecPerKm ? clock(res.then.runPaceSecPerKm) : '', css: res.then?.cssSecPer100 ? clock(res.then.cssSecPer100) : '', use: res.use !== false };
+  const save = () => act(async () => {
+    const manual = Object.fromEntries(Object.entries(f.manual).map(([k, v]) => [k, parseHms(v)]).filter(([, v]) => v));
+    if (parseHms(f.total)) manual.Total = parseHms(f.total);
+    await api('PUT', `/api/races/${id}`, { result: { manual, then: { ftp: f.ftp, runPaceSecPerKm: parseClock(f.run), cssSecPer100: parseClock(f.css) }, use: f.use } });
+    if (S.season) await api('POST', '/api/plan/generate', {});
+  }, 'Result saved.').then(() => { delete draft.races; resultDialog(id); });
+  const diff = (act, mod) => (act && mod ? h('span', { style: `color:var(--${act <= mod ? 'good' : 'bad'})` }, `${act <= mod ? '−' : '+'}${hms(Math.abs(act - mod)).replace(/^0:/, '')}`) : '');
+  const any = a.legs.some((l) => l.secs);
+  openDialog('race', `${r.name} — result`, [
+    h('div', { class: 'row', style: 'margin-bottom:10px' }, h('span', { class: 'pill' }, fmtDate(r.date, true)), h('span', { class: 'pill' }, RACE_TYPES[r.type]),
+      a.total && h('span', { class: 'pill good' }, `Finished ${hms(a.total)}`), a.usable && h('span', { class: 'pill good' }, 'Calibrating predictions')),
+    !any && h('div', { class: 'notice' }, `No swim, bike or run activities were found on ${fmtDate(r.date, true)}. Check the race date, re-import your history under Connect, or type the splits in below.`),
+    h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['Leg', 'Actual', 'Model', 'vs model', 'You held', 'Assumed', 'From'].map((x) => h('th', {}, x)))), h('tbody', {},
+      a.legs.map((l) => h('tr', {}, h('td', {}, h('b', {}, l.label), h('div', { class: 'muted small' }, `${l.km} km`)), h('td', { class: 'num' }, h('b', {}, hms(l.secs))), h('td', { class: 'num' }, hms(l.modelled)), h('td', { class: 'num' }, diff(l.secs, l.modelled)),
+        h('td', { class: 'num' }, l.frac ? h('b', {}, `${Math.round(l.frac * 100)}%`) : '—'), h('td', { class: 'num muted' }, `${Math.round(l.defaultFrac * 100)}%`),
+        h('td', { class: 'small' }, l.source === 'activity' ? l.activity : l.source === 'manual' ? 'entered by you' : h('span', { class: 'muted' }, 'missing'), h('div', { class: 'muted' }, l.note)))),
+      h('tr', {}, h('td', {}, h('b', {}, 'Total')), h('td', { class: 'num' }, h('b', {}, hms(a.total))), h('td', { class: 'num' }, hms(a.modelledTotal)), h('td', { class: 'num' }, diff(a.total, a.modelledTotal)), h('td', {}, ''), h('td', {}, ''), h('td', {}, ''))))),
+    h('p', { class: 'muted small', style: 'margin-top:6px' }, `“Model” is what the generic assumptions predict with the thresholds you held then (${a.then.source}). “You held” is the share of threshold you actually raced each leg at; “Assumed” is the generic figure it replaces.`),
+    a.cda != null && h('div', { class: 'notice info' }, h('b', {}, `Effective CdA ${a.cda}`), ` — the drag area at which your recorded power gives your actual bike split on this course${r.course?.bike ? '' : ' (flat course assumed)'}.`),
+    a.notes.map((n) => h('div', { class: 'notice' }, n)),
+    a.today && a.total && h('div', { class: 'notice good' }, h('b', {}, `The same race today: ${hms(a.today)}`), ` — ${a.today <= a.total ? `${hms(a.total - a.today).replace(/^0:/, '')} faster` : `${hms(a.today - a.total).replace(/^0:/, '')} slower`} than you went, on current thresholds and the way you actually race.`),
+    h('h3', { style: 'margin-top:14px' }, 'Correct the splits'),
+    h('p', { class: 'muted small' }, 'Leave blank to use the recorded activity. Format h:mm:ss. Official results usually beat watch splits when transitions were recorded inside a leg.'),
+    h('div', { class: 'form' }, a.legs.map((l) => field(l.label, h('input', { value: f.manual[l.label], placeholder: l.secs ? hms(l.secs) : '0:00:00', oninput: (e) => (f.manual[l.label] = e.target.value) }))),
+      field('Official total', h('input', { value: f.total, placeholder: a.total ? hms(a.total) : '0:00:00', oninput: (e) => (f.total = e.target.value) }))),
+    h('h3', { style: 'margin-top:14px' }, 'Your thresholds at the time'),
+    h('div', { class: 'form' }, field('FTP (W)', h('input', { type: 'number', value: f.ftp, placeholder: a.then.ftp ?? '', oninput: (e) => (f.ftp = e.target.value) })),
+      field('Run threshold pace (min:ss /km)', h('input', { value: f.run, placeholder: a.then.runPaceSecPerKm ? clock(a.then.runPaceSecPerKm) : '', onchange: (e) => (f.run = e.target.value) })),
+      field('CSS (min:ss /100 m)', h('input', { value: f.css, placeholder: a.then.cssSecPer100 ? clock(a.then.cssSecPer100) : '', onchange: (e) => (f.css = e.target.value) })),
+      h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: f.use, onchange: (e) => (f.use = e.target.checked) }), 'Use this race to calibrate predictions')),
+    h('p', { class: 'muted small', style: 'margin-top:6px' }, 'The intensities only mean something against the thresholds you held on race day. If your run threshold or CSS was different then, enter it.'),
+    h('div', { class: 'row', style: 'margin-top:12px' }, btn('Save', save, 'primary'), btn(r.course?.bike ? 'Edit course' : 'Add the course GPX', () => courseDialog(id))),
+  ]);
+}
+function raceBaselines() {
+  const past = S.races.filter((r) => r.past && r.result_analysis?.legs.some((l) => l.secs)).sort((a, b) => b.date.localeCompare(a.date));
+  const m = S.raceModel;
+  return card('Race baselines',
+    past.length ? [
+      m && h('p', {}, h('b', {}, 'How you race: '), [m.cda && `effective CdA ${m.cda}`, ...Object.entries(m.fracs).map(([t, fr]) => `${RACE_TYPES[t]}: ${Object.entries(fr).map(([l, v]) => `${l.toLowerCase()} ${Math.round(v * 100)}%`).join(', ')} of threshold`)].filter(Boolean).join(' · '), '. Future predictions and pacing plans use these.'),
+      h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['Race', 'Splits', 'Finish', 'Same race today', ''].map((x) => h('th', {}, x)))), h('tbody', {}, past.map((r) => { const a = r.result_analysis;
+        return h('tr', {}, h('td', {}, h('b', {}, r.name), h('div', { class: 'muted small' }, `${fmtDate(r.date, true)} · ${RACE_TYPES[r.type]}`)),
+          h('td', { class: 'small num' }, a.legs.map((l) => `${l.label} ${hms(l.secs)}${l.frac ? ` (${Math.round(l.frac * 100)}%)` : ''}`).join(' · ')), h('td', { class: 'num' }, h('b', {}, hms(a.total))),
+          h('td', { class: 'num' }, a.today ? [hms(a.today), a.total ? h('div', { class: 'small', style: `color:var(--${a.today <= a.total ? 'good' : 'bad'})` }, `${a.today <= a.total ? '−' : '+'}${hms(Math.abs(a.today - a.total)).replace(/^0:/, '')}`) : null] : '—'),
+          h('td', {}, h('button', { class: 'btn sm', onclick: () => resultDialog(r.id) }, 'Open'))); })))),
+      !m && h('p', { class: 'muted small', style: 'margin-top:8px' }, 'None of these is calibrating predictions yet: open one to check its splits and thresholds.'),
+    ] : h('p', { class: 'muted' }, 'Add a race you have already done under Races & goals (with its real date). If its activities are in your imported history, the app works out the splits, how hard you actually raced each leg and your CdA, and uses them for every future prediction.'));
 }
 function niggleCard() {
   const list = S.niggles || [];
@@ -663,6 +721,7 @@ function vInsights() {
       gap ? h('p', { style: 'margin-top:10px' }, gap.text) : h('p', { class: 'muted small', style: 'margin-top:10px' }, 'Add target splits to see which discipline is worth the most training time.'),
       h('div', { style: 'margin-top:8px' }, btn(aRace.course || aRace.podium ? 'Open course & targets' : 'Add course & target splits', () => courseDialog(aRace.id), 'primary'))));
   } else out.push(card('Race prediction', h('p', { class: 'muted' }, 'Add an A-race to see predicted splits, the gap to your target and course-specific training.')));
+  out.push(raceBaselines());
   const cb = I.comeback;
   out.push(card('Against your pre-break self', cb ? [
     h('p', { class: 'muted small' }, `Break ${fmtDate(cb.window.start, true)} – ${fmtDate(cb.window.end, true)} (${cb.window.source === 'profile' ? 'from your profile' : 'detected from your training history — set the dates in Profile if this is wrong'}). “Before” is your best in the 12 months leading into it.`),

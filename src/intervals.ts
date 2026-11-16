@@ -82,6 +82,7 @@ export class Intervals {
         tss: Math.round(r.icu_training_load ?? 0), distanceKm: r.distance ? Math.round(r.distance / 10) / 100 : undefined,
         np: num(r.icu_weighted_avg_watts), avgHr: num(r.average_heartrate),
         intensity: i ? Math.round(i > 3 ? i : i * 100) / 100 : undefined,
+        secs: num(r.moving_time), time: String(r.start_date_local).slice(11, 19) || undefined, ftp: num(r.icu_ftp),
         decoupling: typeof r.decoupling === 'number' && Number.isFinite(r.decoupling) ? Math.round(r.decoupling * 10) / 10 : undefined,
       } as Activity;
     });

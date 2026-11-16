@@ -77,6 +77,11 @@ the Claude API.
   specific block the race-pace bike session becomes the course's climbs (or surge-and-settle work
   for rolling terrain), hilly run courses add hill reps, and hot races add heat acclimation to the
   easy sessions of the last three weeks.
+- **Past-race analysis** — add a race you have already done with its real date. The app links the
+  swim, bike and run recorded that day (ignoring warm-ups), compares actual with modelled splits,
+  works out the share of threshold you actually held on each leg and fits your effective CdA from
+  the bike split and power. Those personal numbers then replace the generic assumptions in every
+  future prediction and pacing plan (intensities for the same race type, CdA for all).
 - **Age-group gap** — enter the splits that reach your goal; the app compares them with your
   predicted splits, shows what 1% of each threshold is worth on that course, and can point the
   plan's extra training time at the discipline furthest behind.
@@ -122,7 +127,7 @@ Re-pushing updates workouts in place and removes ones deleted here. Only events 
 
 ```
 src/engine/   adapt.ts (done-vs-planned adjustments, niggles)  execution.ts (rep grading, progression)
-              course.ts (GPX, split prediction, pacing, age-group gap)  insights.ts (comeback, learned ramp)
+              course.ts (GPX, split prediction, pacing, age-group gap)  raceanalysis.ts (past races, personal model)  insights.ts (comeback, learned ramp)
               season.ts (periodisation, load)  week.ts (scheduler)  workouts.ts (library)
               strength.ts  readiness.ts  zones.ts (targets, Intervals.icu text)  plan.ts (state)
 src/intervals.ts   Intervals.icu API client

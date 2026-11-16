@@ -194,3 +194,60 @@ test('niggles: severity 2 removes intensity, severity 3 replaces runs with rides
   t.niggles[0].resolved = today;
   assert.equal(proposeAdaptations(t, today).length, 0);
 });
+
+test('past race: links the day’s activities, fits CdA and race intensities, and feeds future predictions', async () => {
+  const { analyzeRace, personalModel } = await import('../src/engine/raceanalysis.ts');
+  const { bikePlan } = await import('../src/engine/course.ts');
+  const p = P();
+  const leg = buildLeg(track(10, 3, 4, 0.05));
+  const past: Race = { id: 'old', name: 'Last year 70.3', date: '2026-06-28', type: 'half', priority: 'A', course: { bike: leg, tempC: 20 } };
+  // What actually happened: rode at 79% of FTP on a slippery 0.235 CdA, ran at 88%, swam at 97%.
+  const bikeSecs = bikePlan(leg.km, leg, 0.79, p, { ...past, course: { ...past.course, cda: 0.235 } })!.secs;
+  const acts: Activity[] = [
+    { id: 'w', date: past.date, sport: 'run', name: 'Warm-up jog', durationMin: 10, secs: 600, tss: 8, distanceKm: 1.8, time: '06:10:00' },
+    { id: 's', date: past.date, sport: 'swim', name: 'Race swim', durationMin: 30, secs: Math.round((19 * 92) / 0.97), tss: 40, distanceKm: 1.9, time: '07:00:00' },
+    { id: 'b', date: past.date, sport: 'bike', name: 'Race bike', durationMin: Math.round(bikeSecs / 60), secs: bikeSecs, tss: 150, distanceKm: leg.km, np: Math.round(0.79 * 280), ftp: 280, time: '07:35:00' },
+    { id: 'r', date: past.date, sport: 'run', name: 'Race run', durationMin: 94, secs: Math.round((21.1 * 235) / 0.88), tss: 130, distanceKm: 21.1, time: '09:50:00' },
+    { id: 'x', date: '2026-06-27', sport: 'bike', name: 'Day-before spin', durationMin: 30, tss: 15, distanceKm: 15 },
+  ];
+  const a = analyzeRace(past, acts, p)!;
+  assert.deepEqual(a.legs.map((l) => l.activity), ['Race swim', 'Race bike', 'Race run'], 'warm-up jog is not mistaken for the run leg');
+  assert.ok(Math.abs(a.cda! - 0.235) < 0.006, `fitted CdA ${a.cda}`);
+  assert.ok(Math.abs(a.legs[1].frac! - 0.79) < 0.005);
+  assert.ok(Math.abs(a.legs[2].frac! - 0.88) < 0.005);
+  assert.ok(Math.abs(a.legs[0].frac! - 0.97) < 0.01);
+  assert.equal(a.total, a.legs.reduce((t, l) => t + l.secs!, 0) + 240);
+  assert.equal(a.usable, true);
+  assert.match(a.then.source, /FTP from the race activity/);
+
+  const model = personalModel([past], acts, p, '2026-11-11')!;
+  assert.deepEqual(model.sources, ['Last year 70.3']);
+  assert.ok(Math.abs(model.cda! - 0.235) < 0.006);
+  assert.ok(Math.abs(model.fracs.half!.Bike - 0.79) < 0.005);
+  // A future half now uses the athlete's own numbers; an Olympic keeps generic intensities but the fitted CdA.
+  const next: Race = { id: 'n', name: 'Next 70.3', date: '2027-06-27', type: 'half', priority: 'A' };
+  const generic = predictRace(next, p)!, personal = predictRace(next, p, model)!;
+  assert.match(personal.legs[1].note, /79% FTP/);
+  assert.ok(personal.legs[2].secs! > generic.legs[2].secs!, 'slower personal run intensity gives a slower run');
+  const oly: Race = { ...next, id: 'o', type: 'olympic' };
+  assert.match(predictRace(oly, p, model)!.legs[1].note, /92% FTP/);
+  assert.ok(predictRace(oly, p, model)!.legs[1].secs! < predictRace(oly, p)!.legs[1].secs!, 'lower fitted CdA makes the bike faster');
+  // the same race is not a "past" race before it happens
+  assert.equal(personalModel([past], acts, p, '2026-06-01'), undefined);
+
+  // Manual splits and thresholds-then override the activities; opting out removes it from the model.
+  const edited: Race = { ...past, result: { manual: { Run: 5400 }, then: { ftp: 300 }, use: true } };
+  const e = analyzeRace(edited, acts, p)!;
+  assert.equal(e.legs[2].source, 'manual');
+  assert.equal(e.legs[2].secs, 5400);
+  assert.ok(Math.abs(e.legs[1].frac! - (0.79 * 280) / 300) < 0.005);
+  assert.equal(personalModel([{ ...past, result: { use: false } }], acts, p, '2026-11-11'), undefined);
+  // An impossible split is reported and kept out of the model.
+  const bad = analyzeRace({ ...past, result: { manual: { Run: 3000 } } }, acts, p)!;
+  assert.equal(bad.legs[2].frac, null);
+  assert.ok(bad.notes.some((n) => /not used for calibration/.test(n)));
+  // No activities and no manual splits: nothing to analyse, nothing usable.
+  const none = analyzeRace(past, [], p)!;
+  assert.equal(none.usable, false);
+  assert.equal(none.legs[0].source, 'missing');
+});

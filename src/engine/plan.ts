@@ -3,6 +3,7 @@
 import type { Activity, Availability, Checkin, Goal, Niggle, Profile, Race, SeasonWeek, Session, Sport, Wellness, Workout } from './types.ts';
 import { courseDemands, gapAnalysis, predictRace } from './course.ts';
 import { comebackTracker, learnedRamp } from './insights.ts';
+import { analyzeRace, personalModel } from './raceanalysis.ts';
 import { addDays, diffDays, mondayOf } from './dates.ts';
 import { buildSeason } from './season.ts';
 import { buildWeek } from './week.ts';
@@ -68,7 +69,8 @@ export function generate(s: State, today: string, scope: 'future' | 'week' = 'fu
   s.profile.learnedRamp = learnedRamp(s.wellness)?.suggested;
   const season = buildSeason({ today, profile: s.profile, availability: s.availability, races: s.races, ctl: currentCtl(s) });
   // Attach what the target course demands, and how far out the race is, to each week.
-  const demands = new Map(s.races.map((r) => [r.id, courseDemands(r, s.profile)]));
+  const model = personalModel(s.races, s.activities, s.profile, today);
+  const demands = new Map(s.races.map((r) => [r.id, courseDemands(r, s.profile, model)]));
   for (const w of season.weeks) {
     const race = s.races.find((r) => r.id === w.targetRaceId);
     if (!race || race.date < w.start) continue;
@@ -295,10 +297,17 @@ export function viewState(s: State, today: string) {
   if (p.runTarget === 'pace' && !p.runPaceSecPerKm) needs.push('run threshold pace');
   if (!p.cssSecPer100) needs.push('swim CSS');
 
+  const model = personalModel(s.races, s.activities, p, today);
   const nextRace = s.races.filter((r) => r.date >= today).sort((a, b) => a.date.localeCompare(b.date))[0];
   return {
     today, profile: p, availability: s.availability, goals: s.goals,
-    races: s.races.map((r) => ({ ...r, analysis: { prediction: predictRace(r, p), gap: gapAnalysis(r, p), demands: courseDemands(r, p) } })),
+    races: s.races.map((r) => ({
+      ...r, past: r.date < today,
+      analysis: { prediction: predictRace(r, p, model), gap: gapAnalysis(r, p, model), demands: courseDemands(r, p, model) },
+      // Only races already run have a result to analyse.
+      result_analysis: r.date < today ? analyzeRace(r, s.activities, p, model) : null,
+    })),
+    raceModel: model ?? null,
     insights: {
       comeback: comebackTracker(p, s.activities, s.wellness, s.season?.weeks ?? [], today),
       ramp: learnedRamp(s.wellness),

@@ -217,7 +217,7 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       const prev = new Map(s().races.map((r) => [r.id, r]));
       s().races = b.filter((r: any) => isDate(r?.date) && r?.name).slice(0, 40).map((r: any) => ({
         // Course and target splits are edited separately and must survive a save of the list.
-        course: prev.get(r.id)?.course, podium: prev.get(r.id)?.podium,
+        course: prev.get(r.id)?.course, podium: prev.get(r.id)?.podium, result: prev.get(r.id)?.result,
         id: r.id || uid('r'), name: String(r.name).slice(0, 80), date: r.date,
         type: types.includes(r.type) ? r.type : 'olympic', priority: ['A', 'B', 'C'].includes(r.priority) ? r.priority : 'B',
         goal: r.goal ? String(r.goal).slice(0, 200) : undefined, notes: r.notes ? String(r.notes).slice(0, 500) : undefined,
@@ -246,6 +246,15 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       if ('transitionMin' in b) c.transitionMin = num(b.transitionMin, 0, 30);
       if ('wetsuit' in b) c.wetsuit = !!b.wetsuit;
       race.course = Object.values(c).some((v) => v !== undefined && v !== false) ? c : undefined;
+      if (b.result) {
+        const manual: Record<string, number> = {};
+        for (const [k, v] of Object.entries<any>(b.result.manual ?? {})) {
+          const n = num(v, 30, 172800);
+          if (n && ['Swim', 'Bike', 'Run', 'Run 1', 'Run 2', 'Total'].includes(k)) manual[k] = n;
+        }
+        const then = { ftp: num(b.result.then?.ftp, 80, 600), runPaceSecPerKm: num(b.result.then?.runPaceSecPerKm, 150, 480), cssSecPer100: num(b.result.then?.cssSecPer100, 55, 200) };
+        race.result = { manual: Object.keys(manual).length ? manual : undefined, then: Object.values(then).some((v) => v !== undefined) ? then : undefined, use: b.result.use !== false };
+      }
       if (b.podium) {
         const p = { swim: num(b.podium.swim, 60, 86400), bike: num(b.podium.bike, 60, 86400), run: num(b.podium.run, 60, 86400), total: num(b.podium.total, 60, 172800) };
         race.podium = Object.values(p).some((v) => v !== undefined) ? p : undefined;

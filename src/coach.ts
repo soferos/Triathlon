@@ -8,6 +8,7 @@ import { summarizeHistory } from './engine/history.ts';
 import { proposeAdaptations } from './engine/adapt.ts';
 import { gapAnalysis, predictRace } from './engine/course.ts';
 import { comebackTracker, learnedRamp } from './engine/insights.ts';
+import { analyzeRace, personalModel } from './engine/raceanalysis.ts';
 import { currentCtl, customWorkout, generate, uid, type State } from './engine/plan.ts';
 import { finalize, toIcuText, zoneTable } from './engine/zones.ts';
 import type { Session } from './engine/types.ts';
@@ -140,8 +141,14 @@ export function coachContext(s: State, today: string): string {
   if (sess.length) { out.push(`Sessions ${from} to ${to}:`); for (const x of sess) out.push(`  ${line(x)}`); }
 
   const hms = (t: number) => `${Math.floor(t / 3600)}:${String(Math.floor((t % 3600) / 60)).padStart(2, '0')}:${String(Math.round(t % 60)).padStart(2, '0')}`;
+  const model = personalModel(s.races, s.activities, p, today);
+  if (model) out.push(`Personal race model fitted from ${model.sources.join(', ')}:${model.cda ? ` effective CdA ${model.cda};` : ''} ${Object.entries(model.fracs).map(([t, f]) => `${t}: ${Object.entries(f!).map(([l, v]) => `${l} ${Math.round(v * 100)}%`).join(', ')}`).join(' | ')} of threshold. Predictions below use it.`);
+  for (const r of s.races.filter((x) => x.date < today).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 3)) {
+    const a = analyzeRace(r, s.activities, p, model);
+    if (a?.legs.some((l) => l.secs)) out.push(`Past race ${r.name} (${r.date}, ${r.type}): ${a.legs.map((l) => `${l.label} ${l.secs ? hms(l.secs) : '?'}${l.frac ? ` at ${Math.round(l.frac * 100)}% of threshold` : ''}`).join(', ')}${a.total ? `, total ${hms(a.total)}` : ''}.${a.today ? ` Same course on today's thresholds: ${hms(a.today)}.` : ''}`);
+  }
   for (const r of races.filter((x) => x.priority === 'A').slice(0, 2)) {
-    const pr = predictRace(r, p), gap = gapAnalysis(r, p);
+    const pr = predictRace(r, p, model), gap = gapAnalysis(r, p, model);
     if (pr?.total) out.push(`Predicted for ${r.name} on current thresholds: ${hms(pr.total)} (${pr.legs.map((l) => `${l.label} ${l.secs ? hms(l.secs) : '?'}`).join(', ')}).${r.course?.bike ? ` Bike course ${r.course.bike.km} km with ${r.course.bike.gain} m climbing, ${r.course.bike.climbs.length} climbs.` : ''}${r.course?.tempC != null ? ` Expected ${r.course.tempC} °C.` : ''}`);
     if (gap?.rows.length) out.push(`Against the athlete's target splits: ${gap.text}`);
   }

@@ -1,7 +1,7 @@
 // Course modelling: turns GPX tracks into legs with climbs, predicts race splits from current
 // thresholds with a physics model for the bike, compares them with the athlete's target splits,
 // and summarises what the course demands so specific-phase training can mirror it.
-import type { Climb, CourseDemands, CourseLeg, Profile, Race, RaceType, Sport } from './types.ts';
+import type { Climb, CourseDemands, CourseLeg, Profile, Race, RaceModel, RaceType, Sport } from './types.ts';
 
 type Pt = [number, number, number]; // lat, lon, elevation
 
@@ -67,8 +67,9 @@ export function buildLeg(points: Pt[]): CourseLeg {
 // ---------- race model ----------
 interface LegSpec { sport: Sport; label: string; km: number; frac: number }
 /** Standard distances and the intensity (fraction of threshold) a well-trained athlete races each leg at. */
-export function raceLegs(type: RaceType): LegSpec[] {
-  const L = (sport: Sport, label: string, km: number, frac: number): LegSpec => ({ sport, label, km, frac });
+export function raceLegs(type: RaceType, model?: RaceModel): LegSpec[] {
+  // The athlete's own fitted intensity for this race type and leg wins over the generic one.
+  const L = (sport: Sport, label: string, km: number, frac: number): LegSpec => ({ sport, label, km, frac: model?.fracs[type]?.[label] ?? frac });
   switch (type) {
     case 'sprint': return [L('swim', 'Swim', 0.75, 1.01), L('bike', 'Bike', 20, 0.97), L('run', 'Run', 5, 1.0)];
     case 'olympic': return [L('swim', 'Swim', 1.5, 0.98), L('bike', 'Bike', 40, 0.92), L('run', 'Run', 10, 0.97)];
@@ -102,11 +103,11 @@ export interface BikePlan {
   flatWatts: number;
 }
 /** Variable-power pacing: push the climbs, ease the descents, hold normalised power at the target. */
-export function bikePlan(km: number, leg: CourseLeg | undefined, frac: number, p: Profile, race: Race): BikePlan | null {
+export function bikePlan(km: number, leg: CourseLeg | undefined, frac: number, p: Profile, race: Race, model?: RaceModel): BikePlan | null {
   if (!p.ftp) return null;
   const c = race.course ?? {};
   const mass = (p.weightKg ?? 75) + (c.bikeKg ?? 9);
-  const cda = c.cda ?? 0.27, rho = 1.225 * (288 / (273 + (c.tempC ?? 15)));
+  const cda = c.cda ?? model?.cda ?? 0.27, rho = 1.225 * (288 / (273 + (c.tempC ?? 15)));
   const target = frac * p.ftp;
   const segs: { m: number; grade: number; km: number }[] = [];
   if (leg && leg.profile.length > 1) {
@@ -143,7 +144,7 @@ export function bikePlan(km: number, leg: CourseLeg | undefined, frac: number, p
   };
 }
 
-function runSecs(km: number, leg: CourseLeg | undefined, frac: number, p: Profile): number | null {
+export function runSecs(km: number, leg: CourseLeg | undefined, frac: number, p: Profile): number | null {
   if (!p.runPaceSecPerKm) return null;
   const base = p.runPaceSecPerKm / frac; // s/km on the flat
   if (!leg || leg.profile.length < 2) return km * base;
@@ -167,8 +168,8 @@ export interface Prediction {
   bike: BikePlan | null;
   missing: string[];
 }
-export function predictRace(race: Race, p: Profile): Prediction | null {
-  const specs = raceLegs(race.type);
+export function predictRace(race: Race, p: Profile, model?: RaceModel): Prediction | null {
+  const specs = raceLegs(race.type, model);
   if (!specs.length) return null;
   const c = race.course ?? {};
   const missing: string[] = [];
@@ -181,7 +182,7 @@ export function predictRace(race: Race, p: Profile): Prediction | null {
     }
     if (l.sport === 'bike') {
       const km = c.bike ? Math.round(c.bike.km * 10) / 10 : l.km;
-      bike = bikePlan(km, c.bike, l.frac, p, race);
+      bike = bikePlan(km, c.bike, l.frac, p, race, model);
       if (!bike) { missing.push('bike FTP'); return { ...l, km, secs: null, note: '' }; }
       return { ...l, km, secs: bike.secs, note: `NP ${bike.np} W (${Math.round(l.frac * 100)}% FTP), ${bike.kph} km/h${c.bike ? `, ${c.bike.gain} m climbing` : ', flat assumed'}` };
     }
@@ -199,8 +200,8 @@ export function predictRace(race: Race, p: Profile): Prediction | null {
 export interface GapRow { sport: 'swim' | 'bike' | 'run'; predicted: number; target: number; gap: number; pct: number; perPercent: number }
 export interface Gap { rows: GapRow[]; totalGap: number | null; focus: 'swim' | 'bike' | 'run' | null; text: string }
 /** Compare predicted splits with the athlete's target splits and find where the time is. */
-export function gapAnalysis(race: Race, p: Profile): Gap | null {
-  const pred = predictRace(race, p);
+export function gapAnalysis(race: Race, p: Profile, model?: RaceModel): Gap | null {
+  const pred = predictRace(race, p, model);
   const pod = race.podium;
   if (!pred || !pod) return null;
   const sum = (sport: Sport, pr: Prediction) => pr.legs.filter((l) => l.sport === sport).reduce((t, l) => t + (l.secs ?? NaN), 0);
@@ -214,7 +215,7 @@ export function gapAnalysis(race: Race, p: Profile): Gap | null {
   for (const sport of ['swim', 'bike', 'run'] as const) {
     const predicted = sum(sport, pred), target = pod[sport];
     if (!target || !Number.isFinite(predicted) || !predicted) continue;
-    const perPercent = predicted - sum(sport, predictRace(race, better[sport])!);
+    const perPercent = predicted - sum(sport, predictRace(race, better[sport], model)!);
     rows.push({ sport, predicted: Math.round(predicted), target, gap: Math.round(predicted - target), pct: Math.round(((predicted - target) / target) * 1000) / 10, perPercent: Math.round(perPercent) });
   }
   const totalGap = pred.total != null && pod.total ? pred.total - pod.total : rows.length ? rows.reduce((t, r) => t + r.gap, 0) : null;
@@ -233,11 +234,11 @@ export function gapAnalysis(race: Race, p: Profile): Gap | null {
 }
 
 /** Reduce a course to the handful of facts that should shape training. */
-export function courseDemands(race: Race, p: Profile): CourseDemands | undefined {
+export function courseDemands(race: Race, p: Profile, model?: RaceModel): CourseDemands | undefined {
   const c = race.course;
   if (!c) return undefined;
-  const bikeSpec = raceLegs(race.type).find((l) => l.sport === 'bike');
-  const plan = c.bike && bikeSpec ? bikePlan(c.bike.km, c.bike, bikeSpec.frac, p, race) : null;
+  const bikeSpec = raceLegs(race.type, model).find((l) => l.sport === 'bike');
+  const plan = c.bike && bikeSpec ? bikePlan(c.bike.km, c.bike, bikeSpec.frac, p, race, model) : null;
   const perKm = c.bike ? c.bike.gain / c.bike.km : 0;
   const climbs = (plan?.climbs ?? []).filter((x) => x.min >= 3).sort((a, b) => b.min - a.min);
   const hot = (c.tempC ?? 0) >= 26;
