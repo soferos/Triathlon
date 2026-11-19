@@ -10,7 +10,7 @@ import { addDays, diffDays, mondayOf } from './dates.ts';
 import { buildSeason } from './season.ts';
 import { buildWeek } from './week.ts';
 import { defaultAvailability, defaultProfile } from './defaults.ts';
-import { assessReadiness, monotony, type Readiness } from './readiness.ts';
+import { assessReadiness, HRV_LABEL, monotony, pickSources, RHR_LABEL, type Readiness } from './readiness.ts';
 import { finalize, toIcuText, viewWorkout, zoneTable } from './zones.ts';
 import { bike, run, swim } from './workouts.ts';
 import { strengthProgramme } from './strength.ts';
@@ -420,7 +420,7 @@ function cached<T>(name: string, key: string, fn: () => T): T {
 export function viewState(s: State, today: string) {
   const p = s.profile;
   const dataKey = `${today}|${s.intervals.lastSync}|${s.activities.length}|${s.wellness.length}|${JSON.stringify(p.comeback)}|${s.season?.generatedAt}`;
-  const readiness = assessReadiness(today, s.wellness, s.checkins[today]);
+  const readiness = assessReadiness(today, s.wellness, s.checkins[today], p.recovery);
   const sessions = s.sessions
     .filter((x) => x.date >= addDays(mondayOf(today), -28))
     .map((x) => ({ ...x, workout: renderWorkout(x.workout, p) }));
@@ -483,6 +483,15 @@ export function viewState(s: State, today: string) {
     library: s.library.map((l) => ({ id: l.id, workout: renderWorkout(l.workout, p) })),
     season: s.season, sessions, weekStats, weekWarnings: s.weekWarnings,
     readiness, checkin: s.checkins[today] ?? null,
+    // The raw recovery numbers behind the readiness check, newest first, so they can be compared with the watch.
+    recovery: (() => {
+      const used = pickSources(s.wellness, p.recovery);
+      return {
+        used: { rhr: RHR_LABEL[used.rhr], hrv: HRV_LABEL[used.hrv] },
+        days: [...s.wellness].filter((w) => w.date <= today && (w.restingHR || w.avgSleepingHR || w.hrv || w.hrvSDNN || w.sleepSecs)).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 10)
+          .map((w) => ({ date: w.date, restingHR: w.restingHR ?? null, avgSleepingHR: w.avgSleepingHR ?? null, hrv: w.hrv ?? null, hrvSDNN: w.hrvSDNN ?? null, sleepH: w.sleepSecs ? Math.round(w.sleepSecs / 360) / 10 : null })),
+      };
+    })(),
     intervals: {
       connected: !!s.intervals.apiKey, athleteId: s.intervals.athleteId, athleteName: s.intervals.athleteName,
       lastSync: s.intervals.lastSync, lastPush: s.intervals.lastPush, lastError: s.intervals.lastError,

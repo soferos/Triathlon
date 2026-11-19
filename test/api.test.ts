@@ -33,7 +33,7 @@ before(async () => {
     const inRange = (d: string) => d.slice(0, 10) >= oldest && d.slice(0, 10) <= newest;
     if (req.method === 'GET' && path === '/wellness') {
       return json(200, [
-        ...Array.from({ length: 30 }, (_, i) => ({ id: `2026-10-${String(i + 1).padStart(2, '0')}`, ctl: 40 + i * 0.1, atl: 42, hrv: 70, restingHR: 46 })),
+        ...Array.from({ length: 30 }, (_, i) => ({ id: `2026-10-${String(i + 1).padStart(2, '0')}`, ctl: 40 + i * 0.1, atl: 42, hrv: 70, restingHR: 46, avgSleepingHR: 41, hrvSDNN: 52 })),
         { id: '2025-07-01', ctl: 88, atl: 90 },
       ].filter((w) => inRange(w.id)));
     }
@@ -360,4 +360,21 @@ test('linking an activity grades it against the plan immediately, and it can be 
   icu.intervals = mk(280);
   await api('POST', '/api/intervals/sync', {});
   assert.ok(['nailed', 'unstructured'].includes((await api('GET', '/api/state')).data.sessions.find((s: any) => s.id === add.data.id).actual.exec.verdict));
+});
+
+test('recovery fields: overnight HR and SDNN are imported, shown with their source, and the choice is saved', async () => {
+  await api('POST', '/api/intervals/connect', { apiKey: 'secret-key' });
+  let { data } = await api('GET', '/api/state');
+  assert.ok(data.recovery.days.length > 0);
+  assert.equal(data.recovery.days[0].avgSleepingHR, 41);
+  assert.equal(data.recovery.days[0].hrvSDNN, 52);
+  assert.equal(data.recovery.days[0].restingHR, 46);
+  assert.match(data.recovery.used.rhr, /asleep/);
+  const prof = { ...data.profile, recovery: { rhr: 'resting', hrv: 'auto' } };
+  assert.equal((await api('PUT', '/api/profile', prof)).status, 200);
+  data = (await api('GET', '/api/state')).data;
+  assert.deepEqual(data.profile.recovery, { rhr: 'resting', hrv: 'auto' });
+  assert.match(data.recovery.used.rhr, /daily resting/);
+  assert.equal((await api('PUT', '/api/profile', { ...prof, recovery: { rhr: 'bogus', hrv: 'sdnn' } })).status, 200);
+  assert.deepEqual((await api('GET', '/api/state')).data.profile.recovery, { rhr: 'resting', hrv: 'sdnn' }, 'invalid values keep the previous choice');
 });

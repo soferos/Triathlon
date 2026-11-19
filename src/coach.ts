@@ -171,7 +171,7 @@ export function coachContext(s: State, today: string): string {
   const ctl = currentCtl(s);
   const lastW = s.wellness.at(-1);
   if (ctl != null) out.push(`Fitness: CTL ${ctl.toFixed(0)}${lastW?.atl != null ? `, ATL ${lastW.atl.toFixed(0)}, form ${(ctl - lastW.atl).toFixed(0)}` : ''}.`);
-  const r = assessReadiness(today, s.wellness, s.checkins[today]);
+  const r = assessReadiness(today, s.wellness, s.checkins[today], s.profile.recovery);
   out.push(`Readiness today: ${r.status}${r.score != null ? ` (${r.score}/100)` : ''}${r.signals.length ? ` — ${r.signals.map((x) => `${x.label}: ${x.value} [${x.status}]`).join('; ')}` : ''}`);
 
   const h = summarizeHistory(s.activities, s.wellness, today);

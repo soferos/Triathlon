@@ -219,6 +219,16 @@ function intensityNote(x) {
   return a > p ? `Harder than prescribed: IF ${a} against ${p} planned${x.workout.hard ? '' : ' — an easy day was not easy'}.` : `Easier than prescribed: IF ${a} against ${p} planned${x.workout.hard ? ' — the quality was not there' : ''}.`;
 }
 const EXEC = { nailed: 'on target', over: 'above target', under: 'below target', 'cut short': 'cut short', unstructured: 'could not be graded' };
+// The raw numbers behind the recovery signals, for comparing with the watch.
+function recoveryData() {
+  const R = S.recovery;
+  if (!R?.days.length) return null;
+  const v = (x, d = 0) => (x == null ? '—' : x.toFixed(d));
+  return h('details', { style: 'margin-top:10px' }, h('summary', { class: 'muted small' }, 'The numbers behind this'),
+    h('p', { class: 'muted small', style: 'margin:8px 0' }, `Used: ${R.used.rhr} and HRV as ${R.used.hrv}. These come from Intervals.icu, which gets them from your watch or health app; the app never measures anything itself. If a figure here differs from your watch, Intervals.icu holds a different measure (many apps report a daytime “resting” heart rate that is higher than the overnight one). You can choose which to use under Setup → Profile.`),
+    h('div', { class: 'scroll' }, h('table', { class: 'small' }, h('thead', {}, h('tr', {}, ['Day', 'Resting HR', 'Asleep HR', 'HRV rMSSD', 'HRV SDNN', 'Sleep'].map((c) => h('th', {}, c)))),
+      h('tbody', {}, R.days.map((d) => h('tr', {}, h('td', { class: 'num' }, fmtDate(d.date)), h('td', { class: 'num' }, v(d.restingHR)), h('td', { class: 'num' }, v(d.avgSleepingHR)), h('td', { class: 'num' }, v(d.hrv)), h('td', { class: 'num' }, v(d.hrvSDNN)), h('td', { class: 'num' }, d.sleepH == null ? '—' : `${d.sleepH} h`)))))));
+}
 const actualLine = (a) => [hm(a.durationMin || 0), a.distanceKm && `${a.distanceKm} km`, `${a.tss ?? 0} TSS`, a.np && `NP ${Math.round(a.np)} W`, a.avgHr && `${Math.round(a.avgHr)} bpm`].filter(Boolean).join(' · ');
 // How the completed session compares with the plan, by duration.
 function verdict(x) {
@@ -326,7 +336,8 @@ function vToday() {
   const readiness = card('Readiness',
     h('div', { class: 'row' }, h('span', { class: `pill ${cls}` }, r.headline), r.score != null && h('span', { class: 'stat' }, r.score), r.score != null && h('span', { class: 'muted' }, '/ 100')),
     h('p', { style: 'margin-top:8px' }, r.advice),
-    r.signals.map((s) => h('div', { class: 'signal' }, h('span', { class: `pill ${s.status === 'good' ? 'good' : s.status === 'ok' ? '' : s.status}` }, s.label), h('div', {}, h('div', { class: 'num' }, s.value), h('div', { class: 'muted small' }, s.detail)))),
+    r.signals.map((s) => h('div', { class: 'signal' }, h('span', { class: `pill ${s.status === 'good' ? 'good' : s.status === 'ok' ? '' : s.status}` }, s.label), h('div', {}, h('div', { class: 'num' }, s.value), s.source && h('div', { class: 'muted small' }, s.source), h('div', { class: 'muted small' }, s.detail)))),
+    recoveryData(),
     (r.status === 'adjust' || r.status === 'recover') && todays.some((x) => x.status === 'planned') && h('div', { style: 'margin-top:10px' },
       btn('Adapt today’s training', () => act(() => api('POST', '/api/readiness/apply', {}), (res) => res.changes.length ? res.changes.join(' ') : 'Nothing needed changing.'), 'primary')),
     h('details', { style: 'margin-top:12px', open: !S.intervals.connected }, h('summary', {}, 'Daily check-in'),
@@ -663,6 +674,10 @@ function vProfile() {
       h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: p.restDay, onchange: (e) => (p.restDay = e.target.checked) }), 'Protect one full rest day per week'),
       h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: p.autoAdapt, onchange: (e) => (p.autoAdapt = e.target.checked) }), 'Apply suggested adjustments automatically after each sync')),
       S.ctl != null && h('p', { class: 'muted small', style: 'margin-top:10px' }, `Starting fitness is taken from Intervals.icu (CTL ${S.ctl.toFixed(0)}), not from the hours above.`)),
+    card('Recovery data', h('div', { class: 'form' },
+      field('Resting heart rate from', sel(p.recovery ??= { rhr: 'auto', hrv: 'auto' }, 'rhr', { auto: 'Automatic (overnight if available)', sleeping: 'Average HR while asleep', resting: 'Daily resting HR' })),
+      field('HRV measured as', sel(p.recovery, 'hrv', { auto: 'Automatic (rMSSD, else SDNN)', rmssd: 'rMSSD (most watches overnight)', sdnn: 'SDNN (Apple Health)' }))),
+      h('p', { class: 'muted small', style: 'margin-top:10px' }, 'The readiness check compares each morning with your own 60-day baseline of the chosen measure, so the choice matters less than staying consistent. The overnight figures avoid daytime activity and stress. A summary of the recent values is under “The numbers behind this” on the Today page.')),
     card('Return to training', h('div', { class: 'form' },
       h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: p.comeback.active, onchange: (e) => (p.comeback.active = e.target.checked) }), 'I am coming back from a break'),
       field('Weeks off / heavily reduced', h('input', { type: 'number', min: 0, max: 104, value: p.comeback.weeksOff, oninput: (e) => (p.comeback.weeksOff = +e.target.value || 0) })),

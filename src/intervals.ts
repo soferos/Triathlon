@@ -57,7 +57,7 @@ export class Intervals {
     const rows = await this.req('GET', `/athlete/${this.athlete}/wellness?oldest=${oldest}&newest=${newest}`);
     const num = (v: any) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
     return (rows ?? []).map((r: any) => ({
-      date: r.id, ctl: num(r.ctl), atl: num(r.atl), hrv: num(r.hrv), restingHR: num(r.restingHR),
+      date: r.id, ctl: num(r.ctl), atl: num(r.atl), hrv: num(r.hrv), restingHR: num(r.restingHR), hrvSDNN: num(r.hrvSDNN), avgSleepingHR: num(r.avgSleepingHR),
       sleepSecs: num(r.sleepSecs), sleepScore: num(r.sleepScore), soreness: num(r.soreness), fatigue: num(r.fatigue),
       stress: num(r.stress), mood: num(r.mood), motivation: num(r.motivation), weight: num(r.weight),
     }));

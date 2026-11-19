@@ -1,9 +1,29 @@
 // Daily readiness: combines HRV, resting HR, sleep, subjective state and form into one decision —
 // train as planned, adjust, or recover. HRV logic follows the rolling-baseline approach used in
 // HRV-guided training studies (7-day mean vs. the athlete's own normal range).
-import type { Checkin, Wellness } from './types.ts';
+import type { Checkin, RecoveryPrefs, Wellness } from './types.ts';
+import { diffDays } from './dates.ts';
 
-export interface Signal { key: string; label: string; value: string; status: 'good' | 'ok' | 'warn' | 'bad'; detail: string }
+export interface Signal { key: string; label: string; value: string; status: 'good' | 'ok' | 'warn' | 'bad'; detail: string; /** where the number comes from, and when it was recorded */ source?: string }
+
+type RhrField = 'restingHR' | 'avgSleepingHR';
+type HrvField = 'hrv' | 'hrvSDNN';
+export const RHR_LABEL: Record<RhrField, string> = { restingHR: 'daily resting HR', avgSleepingHR: 'average HR while asleep' };
+export const HRV_LABEL: Record<HrvField, string> = { hrv: 'rMSSD', hrvSDNN: 'SDNN' };
+export const DEFAULT_PREFS: RecoveryPrefs = { rhr: 'auto', hrv: 'auto' };
+
+/**
+ * Which stored field each recovery signal reads. A watch's "resting HR" is often a daytime estimate;
+ * the overnight (asleep) figure is the cleaner recovery marker, so 'auto' uses it whenever the
+ * source provides it on most recent days, and falls back to the daily figure otherwise.
+ */
+export function pickSources(wellness: Wellness[], prefs: RecoveryPrefs = DEFAULT_PREFS): { rhr: RhrField; hrv: HrvField } {
+  const recent = [...wellness].sort((a, b) => a.date.localeCompare(b.date)).slice(-21);
+  const has = (f: keyof Wellness) => recent.filter((w) => (w[f] as number | undefined)! > 0).length >= 10;
+  const rhr: RhrField = prefs.rhr === 'resting' ? 'restingHR' : prefs.rhr === 'sleeping' ? 'avgSleepingHR' : has('avgSleepingHR') ? 'avgSleepingHR' : 'restingHR';
+  const hrv: HrvField = prefs.hrv === 'sdnn' ? 'hrvSDNN' : prefs.hrv === 'rmssd' ? 'hrv' : !has('hrv') && has('hrvSDNN') ? 'hrvSDNN' : 'hrv';
+  return { rhr, hrv };
+}
 export interface Readiness {
   status: 'go' | 'adjust' | 'recover' | 'unknown';
   score: number | null;
@@ -15,20 +35,27 @@ export interface Readiness {
 const mean = (a: number[]) => a.reduce((t, x) => t + x, 0) / a.length;
 const sd = (a: number[]) => { const m = mean(a); return Math.sqrt(mean(a.map((x) => (x - m) ** 2))); };
 
-export function assessReadiness(today: string, wellness: Wellness[], checkin?: Checkin): Readiness {
+export function assessReadiness(today: string, wellness: Wellness[], checkin?: Checkin, prefs: RecoveryPrefs = DEFAULT_PREFS): Readiness {
   const hist = wellness.filter((w) => w.date <= today).sort((a, b) => a.date.localeCompare(b.date));
+  const src = pickSources(hist, prefs);
+  const when = (iso: string) => `${iso.slice(8, 10)}/${iso.slice(5, 7)}`;
+  /** A reading from days ago says little about today: shown, but it neither helps nor hurts the score. */
+  const staleDays = (iso: string) => diffDays(today, iso);
   const signals: Signal[] = [];
   let penalty = 0;
   let forced: 'recover' | undefined;
 
   // --- HRV: 7-day rolling ln(rMSSD) against the 60-day normal band (mean ± 0.5 SD) ---
-  const hrv = hist.filter((w) => w.hrv && w.hrv > 0).slice(-60).map((w) => Math.log(w.hrv!));
+  const hrvRows = hist.filter((w) => (w[src.hrv] ?? 0) > 0).slice(-60);
+  const hrv = hrvRows.map((w) => Math.log(w[src.hrv]!));
   if (hrv.length >= 14) {
+    const hrvStale = staleDays(hrvRows.at(-1)!.date) > 2;
     const base = mean(hrv), band = Math.max(sd(hrv) * 0.5, 0.02);
     const recent = mean(hrv.slice(-7)), last = hrv.at(-1)!;
     const z = (recent - base) / (band * 2);
     let status: Signal['status'] = 'good', detail = '7-day average inside your normal range.';
-    if (recent < base - band) {
+    if (hrvStale) { status = 'ok'; detail = `Last reading was ${staleDays(hrvRows.at(-1)!.date)} days ago — your watch has not synced HRV since, so it is not counted today.`; }
+    else if (recent < base - band) {
       status = last < base - band * 2 ? 'bad' : 'warn';
       penalty += status === 'bad' ? 30 : 18;
       detail = 'Suppressed below your normal range: autonomic stress is accumulating.';
@@ -37,17 +64,19 @@ export function assessReadiness(today: string, wellness: Wellness[], checkin?: C
     } else if (recent > base + band * 2.5) {
       status = 'ok'; penalty += 5; detail = 'Unusually high — can accompany deep fatigue. Cross-check how you feel.';
     }
-    signals.push({ key: 'hrv', label: 'HRV', value: `${Math.round(Math.exp(last))} ms (7d ${Math.round(Math.exp(recent))}, base ${Math.round(Math.exp(base))})`, status, detail: `${detail} (z ${z.toFixed(1)})` });
+    signals.push({ key: 'hrv', label: 'HRV', value: `${Math.round(Math.exp(last))} ms (7d ${Math.round(Math.exp(recent))}, base ${Math.round(Math.exp(base))})`, status, detail: hrvStale ? detail : `${detail} (z ${z.toFixed(1)})`, source: `${HRV_LABEL[src.hrv]}, recorded ${when(hrvRows.at(-1)!.date)}` });
   }
 
   // --- Resting HR ---
-  const rhr = hist.filter((w) => w.restingHR && w.restingHR > 0).slice(-60).map((w) => w.restingHR!);
+  const rhrRows = hist.filter((w) => (w[src.rhr] ?? 0) > 0).slice(-60);
+  const rhr = rhrRows.map((w) => w[src.rhr]!);
   if (rhr.length >= 10) {
     const base = mean(rhr.slice(0, -1)), last = rhr.at(-1)!;
     const delta = last - base;
-    const status: Signal['status'] = delta >= 7 ? 'bad' : delta >= 4 ? 'warn' : 'good';
-    penalty += delta >= 7 ? 22 : delta >= 4 ? 10 : 0;
-    signals.push({ key: 'rhr', label: 'Resting HR', value: `${Math.round(last)} bpm (${delta >= 0 ? '+' : ''}${delta.toFixed(0)})`, status, detail: delta >= 4 ? 'Elevated versus baseline: incomplete recovery, heat, dehydration or oncoming illness.' : 'At baseline.' });
+    const rhrStale = staleDays(rhrRows.at(-1)!.date) > 2;
+    const status: Signal['status'] = rhrStale ? 'ok' : delta >= 7 ? 'bad' : delta >= 4 ? 'warn' : 'good';
+    if (!rhrStale) penalty += delta >= 7 ? 22 : delta >= 4 ? 10 : 0;
+    signals.push({ key: 'rhr', label: src.rhr === 'avgSleepingHR' ? 'Sleeping HR' : 'Resting HR', value: `${Math.round(last)} bpm (${delta >= 0 ? '+' : ''}${delta.toFixed(0)})`, status, source: `${RHR_LABEL[src.rhr]}, recorded ${when(rhrRows.at(-1)!.date)}`, detail: rhrStale ? `Last reading was ${staleDays(rhrRows.at(-1)!.date)} days ago — not counted today.` : delta >= 4 ? 'Elevated versus baseline: incomplete recovery, heat, dehydration or oncoming illness.' : 'At baseline.' });
   }
 
   // --- Sleep ---

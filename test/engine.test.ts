@@ -339,3 +339,30 @@ test('unlink: an activity matched to the wrong session can be detached, stays de
   assert.equal(u.restoredDate, planned);
   assert.equal(long.date, planned);
 });
+
+test('readiness: prefers the overnight heart rate, falls back to SDNN, honours explicit choices and ignores stale readings', async () => {
+  const { pickSources } = await import('../src/engine/readiness.ts');
+  const day = (i: number, x: Partial<Wellness> = {}): Wellness => ({ date: addDays(TODAY, i - 29), restingHR: 68, hrv: undefined, ...x });
+  // a watch that reports a daytime "resting" HR of ~68 and an overnight HR of ~51, with SDNN rather than rMSSD
+  const apple: Wellness[] = Array.from({ length: 30 }, (_, i) => day(i, { avgSleepingHR: 51 + (i % 3), hrvSDNN: 60 + (i % 5) }));
+  assert.deepEqual(pickSources(apple), { rhr: 'avgSleepingHR', hrv: 'hrvSDNN' });
+  assert.deepEqual(pickSources(apple, { rhr: 'resting', hrv: 'auto' }), { rhr: 'restingHR', hrv: 'hrvSDNN' });
+  assert.deepEqual(pickSources(apple.map((w) => ({ ...w, avgSleepingHR: undefined })), { rhr: 'auto', hrv: 'rmssd' }), { rhr: 'restingHR', hrv: 'hrv' });
+  const r = assessReadiness(TODAY, apple);
+  const rhr = r.signals.find((x) => x.key === 'rhr')!;
+  assert.match(rhr.value, /^5[123] bpm/);
+  assert.equal(rhr.label, 'Sleeping HR');
+  assert.match(rhr.source!, /average HR while asleep, recorded 11\/11/);
+  assert.match(r.signals.find((x) => x.key === 'hrv')!.source!, /^SDNN/);
+  const daily = assessReadiness(TODAY, apple, undefined, { rhr: 'resting', hrv: 'auto' }).signals.find((x) => x.key === 'rhr')!;
+  assert.match(daily.value, /^68 bpm/);
+  assert.equal(daily.label, 'Resting HR');
+
+  // a watch that stopped syncing 5 days ago: the old reading is shown but cannot sink today's score
+  const stale: Wellness[] = apple.slice(0, 25).map((w, i) => ({ ...w, avgSleepingHR: i === 24 ? 70 : 51 }));
+  const s2 = assessReadiness(TODAY, stale);
+  const sig = s2.signals.find((x) => x.key === 'rhr')!;
+  assert.match(sig.detail, /5 days ago/);
+  assert.equal(sig.status, 'ok');
+  assert.ok((s2.score ?? 100) > 80, 'a stale, high reading does not penalise today');
+});

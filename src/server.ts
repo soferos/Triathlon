@@ -242,6 +242,7 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
         strengthEquipment: pickOf(b.strengthEquipment, ['gym', 'home'], p.strengthEquipment),
         autoThresholds: b.autoThresholds === undefined ? p.autoThresholds : !!b.autoThresholds,
         autoAdapt: b.autoAdapt === undefined ? p.autoAdapt : !!b.autoAdapt,
+        recovery: { rhr: pickOf(b.recovery?.rhr, ['auto', 'resting', 'sleeping'], p.recovery?.rhr ?? 'auto'), hrv: pickOf(b.recovery?.hrv, ['auto', 'rmssd', 'sdnn'], p.recovery?.hrv ?? 'auto') },
       };
       recordThresholds(s(), today());
       return { ok: true };
@@ -467,7 +468,7 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
     'POST /api/readiness/apply': async () => {
       const t = today();
       snapshot(s(), 'Readiness adjustment');
-      const changes = applyReadiness(s(), t, assessReadiness(t, s().wellness, s().checkins[t]));
+      const changes = applyReadiness(s(), t, assessReadiness(t, s().wellness, s().checkins[t], s().profile.recovery));
       if (!changes.length) discardSnapshot(s());
       return { ok: true, changes };
     },

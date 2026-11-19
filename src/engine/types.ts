@@ -44,6 +44,8 @@ export interface Profile {
   autoThresholds: boolean;
   /** Apply load/missed-session adaptations automatically after each sync instead of proposing them */
   autoAdapt: boolean;
+  /** Which Intervals.icu fields feed the readiness check; 'auto' prefers the overnight ones when the watch provides them */
+  recovery?: RecoveryPrefs;
 }
 
 export interface DayAvailability {
@@ -241,6 +243,8 @@ export interface Wellness {
   date: string;
   ctl?: number; atl?: number;
   hrv?: number; restingHR?: number;
+  /** SDNN HRV (ms) and the average heart rate during sleep (bpm), where the source provides them */
+  hrvSDNN?: number; avgSleepingHR?: number;
   sleepSecs?: number; sleepScore?: number;
   soreness?: number; fatigue?: number; stress?: number; mood?: number; motivation?: number;
   weight?: number;
@@ -267,3 +271,5 @@ export interface Activity {
   /** Exact moving time (s), local start time (HH:MM:SS), and the FTP Intervals.icu held for this activity */
   secs?: number; time?: string; ftp?: number;
 }
+
+export interface RecoveryPrefs { rhr: 'auto' | 'resting' | 'sleeping'; hrv: 'auto' | 'rmssd' | 'sdnn' }

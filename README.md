@@ -131,7 +131,7 @@ build or Fly deploy in the test suite; the server, authentication and persistenc
   the plan works around anything you pin.
 - **Strength programme** — periodised with the season: anatomical adaptation → maximal strength →
   power/plyometrics → in-season maintenance, for gym or home equipment.
-- **Daily readiness** — 7-day HRV trend against your own baseline, resting HR, sleep, form and a
+- **Daily readiness** (HRV from the chosen measure — rMSSD or SDNN — and the overnight heart rate when your watch provides it, falling back to the daily resting figure; the source and date of each reading are shown, with the raw recent values under "The numbers behind this" on Today) — 7-day HRV trend against your own baseline, resting HR, sleep, form and a
   subjective check-in. One click shifts or replaces today's session when you are not recovered.
 - **Execution-driven progression** — completed key sessions are graded rep by rep against their
   targets using the intervals Intervals.icu detects. Beat the targets and the next session of that
