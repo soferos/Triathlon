@@ -49,6 +49,55 @@ machine running the app (git-ignored, owner-readable only). Keys are never sent 
 When you use the coach, each message sends your plan, thresholds, recent training and readiness to
 the Claude API.
 
+## Deploying to Fly.io
+
+One small machine and a 1 GB volume (about $4 a month at current prices; check
+[fly.io/pricing](https://fly.io/pricing)). The repo contains the `Dockerfile`, `docker-entrypoint.sh`
+and `fly.toml`. The app is single-user: one machine, one volume, one password.
+
+```bash
+# 1. Install flyctl (https://fly.io/docs/flyctl/install/) and sign in
+fly auth login
+
+# 2. Create the app from the checked-in config. Pick a name and a region near you,
+#    and say no to databases and other add-ons.
+fly launch --copy-config --no-deploy
+
+# 3. Open fly.toml and set TZ to your timezone (e.g. "Europe/London"). "Today" follows it.
+
+# 4. Create the volume that holds your data, in the SAME region as the app
+fly volumes create triathlon_data --size 1 --region <your-region>
+
+# 5. Set the password. Use a long passphrase: it protects your health data and your API keys.
+fly secrets set APP_PASSWORD='a long random passphrase'
+
+# 6. Deploy exactly one machine (the data file lives on one volume; do not scale out)
+fly deploy --ha=false
+fly open
+```
+
+The browser asks for a login: any username, and the password from step 5. Then open **Setup →
+Connect** and paste your Intervals.icu key (and, for the coach, your Anthropic key). Both are stored
+on the volume, never in the image or in the repo.
+
+**Moving your existing data:** copy `data/state.json` from the machine you ran it on:
+
+```bash
+fly ssh sftp shell      # then:  put data/state.json /data/state.json
+fly machine restart     # the entrypoint fixes the file's ownership on start
+```
+
+**Backups:** the data file holds your whole history and API keys. Fly snapshots volumes daily (see
+`fly volumes snapshots list`; check the retention), and you can copy the file any time:
+`fly ssh sftp get /data/state.json state-backup.json`.
+
+**Updating:** `git pull && fly deploy --ha=false`. Logs: `fly logs`.
+
+Things to know: the machine sleeps when idle and wakes on the first request, which takes a few
+seconds; nothing runs in the background, so nothing is missed. HTTPS is forced by Fly. The app has
+no login rate limiting, so the password is the only protection: make it long. There is no Docker
+build or Fly deploy in the test suite; the server, authentication and persistence are tested.
+
 ## What it does
 
 - **Season planning** — periodises backwards from every A-race (rebuild → base → build → specific →

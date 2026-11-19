@@ -1,0 +1,27 @@
+# Fly.io configuration. Create the app and volume with the steps in README.md ("Deploying to Fly.io").
+# `fly launch --copy-config --no-deploy` fills in `app` and `primary_region` for you.
+
+[build]
+
+[env]
+  HOST = "0.0.0.0"
+  PORT = "8080"
+  DATA_DIR = "/data"
+  # Your timezone, as an IANA name. "Today" in the app follows this; a wrong value shifts the day around midnight.
+  TZ = "UTC"
+
+[mounts]
+  source = "triathlon_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Nothing runs in the background (syncs happen when you open the app), so the machine can sleep when idle.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
