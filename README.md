@@ -87,6 +87,12 @@ fly ssh sftp shell      # then:  put data/state.json /data/state.json
 fly machine restart     # the entrypoint fixes the file's ownership on start
 ```
 
+**Signing in:** the app shows its own sign-in page (any username, your password) and remembers the
+device for 90 days with a signed cookie, so opening it from your phone's home screen needs no
+password. Sign out under Setup → Connect → This device. Changing `APP_PASSWORD` signs every device
+out. Five wrong passwords from one address (forty overall) lock sign-in for 15 minutes. HTTP Basic
+(`curl -u any:password`) still works for scripts.
+
 **Backups:** the data file holds your whole history and API keys. Fly snapshots volumes daily (see
 `fly volumes snapshots list`; check the retention), and you can copy the file any time:
 `fly ssh sftp get /data/state.json state-backup.json`.
@@ -94,8 +100,8 @@ fly machine restart     # the entrypoint fixes the file's ownership on start
 **Updating:** `git pull && fly deploy --ha=false`. Logs: `fly logs`.
 
 Things to know: the machine sleeps when idle and wakes on the first request, which takes a few
-seconds; nothing runs in the background, so nothing is missed. HTTPS is forced by Fly. The app has
-no login rate limiting, so the password is the only protection: make it long. There is no Docker
+seconds; nothing runs in the background, so nothing is missed. HTTPS is forced by Fly. The password is
+the only protection (wrong guesses are rate-limited): make it long. There is no Docker
 build or Fly deploy in the test suite; the server, authentication and persistence are tested.
 
 ## What it does

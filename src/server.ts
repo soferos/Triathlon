@@ -2,7 +2,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
-import { timingSafeEqual } from 'node:crypto';
+import { createAuth, loginPage } from './auth.ts';
 import { Store } from './store.ts';
 import { addDays, localToday, mondayOf } from './engine/dates.ts';
 import { applyReadiness, customWorkout, discardSnapshot, ensureHorizon, generate, linkActivity, previewWeek, recordThresholds, reconcile, sessionSig, snapshot, toIcs, uid, undo, unlinkSession, viewState } from './engine/plan.ts';
@@ -180,7 +180,7 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
   const routes: Record<string, (req: IncomingMessage, id?: string) => Promise<unknown>> = {
     'GET /api/state': async () => {
       if (ensureHorizon(s(), today())) store.save();
-      return { ...viewState(s(), today()), coach: { configured: coachConfigured(s()), model: COACH_MODEL, messages: chatView(s()) } };
+      return { ...viewState(s(), today()), auth: { enabled: auth.enabled }, coach: { configured: coachConfigured(s()), model: COACH_MODEL, messages: chatView(s()) } };
     },
 
     'POST /api/coach': async (req) => {
@@ -514,13 +514,7 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
     'DELETE /api/intervals': async () => { s().intervals = {}; return { ok: true }; },
   };
 
-  const auth = (req: IncomingMessage) => {
-    if (!opts.password) return true;
-    const h = req.headers.authorization ?? '';
-    const given = Buffer.from(h.startsWith('Basic ') ? Buffer.from(h.slice(6), 'base64').toString().split(':').slice(1).join(':') : '');
-    const want = Buffer.from(opts.password);
-    return given.length === want.length && timingSafeEqual(given, want);
-  };
+  const auth = createAuth(opts.password);
 
   async function handle(req: IncomingMessage, res: ServerResponse) {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -528,9 +522,36 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(type === 'application/json' ? JSON.stringify(data) : (data as string | Buffer));
     };
-    if (!auth(req)) {
-      res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Triathlon coach"' });
-      return res.end('Authentication required');
+    // ---- sign-in (only when a password is set) ----
+    if (auth.enabled && (url.pathname === '/login' || url.pathname === '/logout')) {
+      const page = (status: number, error?: string) => { res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY' }); res.end(loginPage(error)); };
+      if (url.pathname === '/logout' && req.method === 'POST') {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Set-Cookie': auth.clearCookie(req), 'Cache-Control': 'no-store' });
+        return res.end('{"ok":true}');
+      }
+      if (url.pathname === '/login' && req.method === 'GET') {
+        if (auth.check(req)) { res.writeHead(302, { Location: '/' }); return res.end(); }
+        return page(200);
+      }
+      if (url.pathname === '/login' && req.method === 'POST') {
+        const wait = auth.lockedFor(req);
+        if (wait) return page(429, `Too many failed attempts. Try again in ${wait} minute${wait === 1 ? '' : 's'}.`);
+        let raw = '';
+        for await (const c of req) { raw += c; if (raw.length > 10_000) break; }
+        if (auth.passwordOk(new URLSearchParams(raw).get('password') ?? '')) {
+          res.writeHead(303, { Location: '/', 'Set-Cookie': auth.setCookie(req), 'Cache-Control': 'no-store' });
+          return res.end();
+        }
+        auth.fail(req);
+        await new Promise((r) => setTimeout(r, 400)); // slow down guessing
+        return page(401, 'Wrong password.');
+      }
+      res.writeHead(405); return res.end();
+    }
+    if (!auth.check(req)) {
+      // API calls get a plain 401 (no browser pop-up); page loads go to the sign-in page.
+      if (url.pathname.startsWith('/api/') || req.method !== 'GET') { res.writeHead(401, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); return res.end('{"error":"Sign in required"}'); }
+      res.writeHead(302, { Location: '/login' }); return res.end();
     }
     try {
       if (url.pathname.startsWith('/api/')) {

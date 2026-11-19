@@ -48,6 +48,8 @@ const draft = {}; // unsaved form state per view
 async function api(method, path, body) {
   const res = await fetch(path, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
   const data = await res.json().catch(() => ({}));
+  // The sign-in cookie lapsed (or the password changed): go back to the sign-in page.
+  if (res.status === 401 && S) { location.href = '/login'; throw new Error('Signed out'); }
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
 }
@@ -700,6 +702,8 @@ function vConnect() {
         return h('div', { class: 'row' }, k, btn('Save key', () => act(() => api('PUT', '/api/coach/key', { apiKey: k.value }), k.value ? 'Key saved' : 'Key removed'), 'primary'),
           S.coach.configured && btn('Remove key', () => act(() => api('PUT', '/api/coach/key', { apiKey: '' }), 'Key removed'), 'danger')); })(),
       h('p', { class: 'muted small', style: 'margin-top:8px' }, 'Stored only in data/state.json on this machine, never sent to the browser. Alternatively set ANTHROPIC_API_KEY in the environment. Each message sends your plan, thresholds, recent training and readiness to the Claude API.')),
+    S.auth?.enabled && card('This device', h('p', {}, 'You stay signed in on this device for 90 days. Changing the password (`fly secrets set APP_PASSWORD=…`) signs every device out.'),
+      btn('Sign out of this device', () => fetch('/logout', { method: 'POST' }).then(() => (location.href = '/login')))),
     card('What syncs',
       h('ul', { class: 'clean' },
         h('li', {}, h('b', {}, 'In: '), 'thresholds (FTP, run power, threshold pace, CSS, LTHR), your full activity history and fitness/fatigue (CTL/ATL) back to your first recorded activity, HRV, resting HR, sleep, subjective wellness, and races on your calendar. The first sync imports everything; later syncs refresh the last 60 days.'),
