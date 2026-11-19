@@ -4,6 +4,7 @@ import type { Activity, Availability, Checkin, Goal, Niggle, Profile, Race, Seas
 import { courseDemands, gapAnalysis, predictRace } from './course.ts';
 import { comebackTracker, learnedRamp } from './insights.ts';
 import { analyzeRace, personalModel } from './raceanalysis.ts';
+import { revertProgress } from './execution.ts';
 import { addDays, diffDays, mondayOf } from './dates.ts';
 import { buildSeason } from './season.ts';
 import { buildWeek } from './week.ts';
@@ -44,10 +45,12 @@ export interface State {
   dismissedAdapt?: string[];
   /** Level offsets per workout type, earned through execution (see execution.ts) */
   progress?: Record<string, number>;
+  /** Activities the athlete unlinked from a session: never matched automatically again */
+  unlinked?: string[];
   niggles?: Niggle[];
   debrief?: { week: string; text: string; at: string };
   /** Snapshots taken before plan-changing actions, newest last, for Undo */
-  undo?: { label: string; at: string; sessions: Session[]; overrides: Availability['overrides']; dismissedAdapt: string[] }[];
+  undo?: { label: string; at: string; sessions: Session[]; overrides: Availability['overrides']; dismissedAdapt: string[]; progress: Record<string, number>; unlinked: string[] }[];
 }
 
 export const emptyState = (): State => ({
@@ -107,7 +110,7 @@ export function generate(s: State, today: string, scope: 'future' | 'week' = 'fu
 
 /** Remember the plan as it is now, so the next change can be undone. */
 export function snapshot(s: State, label: string): void {
-  (s.undo ??= []).push({ label, at: new Date().toISOString(), sessions: structuredClone(s.sessions), overrides: structuredClone(s.availability.overrides), dismissedAdapt: [...(s.dismissedAdapt ?? [])] });
+  (s.undo ??= []).push({ label, at: new Date().toISOString(), sessions: structuredClone(s.sessions), overrides: structuredClone(s.availability.overrides), dismissedAdapt: [...(s.dismissedAdapt ?? [])], progress: { ...(s.progress ?? {}) }, unlinked: [...(s.unlinked ?? [])] });
   if (s.undo.length > 10) s.undo.shift();
 }
 /** Drop the newest snapshot when the action it guarded changed nothing. */
@@ -118,6 +121,8 @@ export function undo(s: State): string | null {
   s.sessions = snap.sessions;
   s.availability.overrides = snap.overrides;
   s.dismissedAdapt = snap.dismissedAdapt;
+  s.progress = snap.progress;
+  s.unlinked = snap.unlinked;
   return snap.label;
 }
 
@@ -201,6 +206,7 @@ export function reconcile(s: State): number {
     const a = byId.get(id);
     if (a) record(x, a);
   }
+  const blocked = new Set(s.unlinked ?? []);
   const open = (x: Session, a: Activity) => x.sport === a.sport && !x.actual && x.status !== 'skipped';
   const link = (x: Session, a: Activity) => {
     if (x.date !== a.date) { const planned = x.date; x.date = a.date; record(x, a); x.actual!.plannedDate = planned; } else record(x, a);
@@ -212,7 +218,7 @@ export function reconcile(s: State): number {
   // same-day match wins unless another session is a much better fit (a 2 h run is the long run
   // planned for tomorrow, not today's 30 min jog).
   for (const a of s.activities) {
-    if (used.has(a.id) || a.sport === 'other') continue;
+    if (used.has(a.id) || a.sport === 'other' || blocked.has(a.id)) continue;
     const cands = s.sessions.filter((x) => {
       if (!open(x, a)) return false;
       if (x.date === a.date) return true;
@@ -226,6 +232,50 @@ export function reconcile(s: State): number {
   }
   if (n) s.sessions.sort((a, b) => a.date.localeCompare(b.date));
   return n;
+}
+
+/**
+ * Detach a completed activity from the session it was matched to, so the session is open again
+ * (and can be moved, changed or skipped) and the activity stays an unplanned extra. The session
+ * returns to the day it was planned for if matching had moved it, and any progression it earned
+ * from being graded is taken back. The activity is never matched automatically again.
+ */
+export function unlinkSession(s: State, id: string): { name: string; restoredDate?: string } {
+  const x = s.sessions.find((q) => q.id === id);
+  if (!x?.actual?.activityId) throw new Error('This session is not linked to an activity.');
+  const a = x.actual;
+  if (a.exec) revertProgress((s.progress ??= {}), x.workout.code, a.exec);
+  (s.unlinked ??= []).includes(a.activityId!) || s.unlinked.push(a.activityId!);
+  const restoredDate = a.plannedDate && a.plannedDate !== x.date ? a.plannedDate : undefined;
+  if (restoredDate) x.date = restoredDate;
+  delete x.actual;
+  x.status = 'planned';
+  // A session the plan generated goes back to being the plan's to re-plan; one the athlete made or edited stays pinned.
+  if (x.origin === 'plan') x.locked = false;
+  s.sessions.sort((p, q) => p.date.localeCompare(q.date));
+  return { name: x.workout.name, restoredDate };
+}
+
+/**
+ * Link a recorded activity to a planned session by hand — e.g. the easy ride that was really
+ * Tuesday's recovery spin, not the sweet spot it was auto-matched to. Must be the same sport.
+ * The session takes the activity's day; an activity already linked elsewhere is moved over.
+ */
+export function linkActivity(s: State, activityId: string, sessionId: string): { name: string } {
+  const a = s.activities.find((q) => q.id === activityId);
+  const x = s.sessions.find((q) => q.id === sessionId);
+  if (!a) throw new Error('Activity not found. Sync with Intervals.icu and try again.');
+  if (!x) throw new Error('Session not found.');
+  if (a.sport === 'other' || x.sport !== a.sport) throw new Error('An activity can only be linked to a session of the same sport.');
+  if (x.actual && x.actual.activityId !== a.id) throw new Error('That session is already linked to another activity. Unlink it first.');
+  const prev = s.sessions.find((q) => q.actual?.activityId === a.id && q !== x);
+  if (prev) unlinkSession(s, prev.id);
+  s.unlinked = (s.unlinked ?? []).filter((id) => id !== a.id);
+  const planned = x.date;
+  x.actual = { tss: a.tss, durationMin: a.durationMin, activityId: a.id, name: a.name, distanceKm: a.distanceKm, np: a.np, avgHr: a.avgHr, intensity: a.intensity, decoupling: a.decoupling, plannedDate: planned !== a.date ? planned : undefined };
+  x.date = a.date; x.status = 'done'; x.locked = true;
+  s.sessions.sort((p, q) => p.date.localeCompare(q.date));
+  return { name: x.workout.name };
 }
 
 /** Completed activities since `from` that are not linked to any planned session. */

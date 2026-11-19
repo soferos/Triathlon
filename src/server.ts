@@ -5,7 +5,7 @@ import { extname, join, normalize } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 import { Store } from './store.ts';
 import { addDays, localToday, mondayOf } from './engine/dates.ts';
-import { applyReadiness, customWorkout, discardSnapshot, ensureHorizon, generate, previewWeek, reconcile, sessionSig, snapshot, toIcs, uid, undo, viewState } from './engine/plan.ts';
+import { applyReadiness, customWorkout, discardSnapshot, ensureHorizon, generate, linkActivity, previewWeek, reconcile, sessionSig, snapshot, toIcs, uid, undo, unlinkSession, viewState } from './engine/plan.ts';
 import { assessReadiness } from './engine/readiness.ts';
 import { aerobicVersion, applyAdaptations, proposeAdaptations, resized } from './engine/adapt.ts';
 import { analyzeExecution, applyProgress, plannedReps } from './engine/execution.ts';
@@ -388,6 +388,21 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       s().sessions.sort((a, c) => a.date.localeCompare(c.date));
       return { ok: true };
     },
+    // Detach a completed activity from its session so the session can be moved, changed or skipped.
+    'POST /api/sessions/:id/unlink': async (_req, id) => {
+      const x = s().sessions.find((q) => q.id === id);
+      if (!x?.actual?.activityId) throw new HttpError(400, 'This session is not linked to an activity.');
+      snapshot(s(), `Unlinking “${x.actual.name ?? 'activity'}” from “${x.workout.name}”`);
+      return { ok: true, ...unlinkSession(s(), id as string) };
+    },
+    // Link an unplanned (or wrongly linked) activity to the session it really was.
+    'POST /api/activities/:id/link': async (req, id) => {
+      const b = await body(req);
+      const a = s().activities.find((q) => q.id === id);
+      snapshot(s(), `Linking “${a?.name ?? 'activity'}” to a session`);
+      try { return { ok: true, ...linkActivity(s(), String(id), String(b.sessionId ?? '')) }; }
+      catch (e: any) { discardSnapshot(s()); throw new HttpError(400, e.message); }
+    },
     'DELETE /api/sessions/:id': async (_req, id) => {
       const gone = s().sessions.find((q) => q.id === id);
       if (gone) snapshot(s(), `Deleting “${gone.workout.name}”`);
@@ -503,6 +518,7 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
         let key = `${req.method} ${url.pathname}`;
         let id: string | undefined;
         if (!routes[key] && parts.length === 4) { id = decodeURIComponent(parts[3]); key = `${req.method} /api/${parts[2]}/:id`; }
+        else if (!routes[key] && parts.length === 5) { id = decodeURIComponent(parts[3]); key = `${req.method} /api/${parts[2]}/:id/${parts[4]}`; }
         const route = routes[key];
         if (!route) throw new HttpError(404, 'Not found');
         const out = await route(req, id);

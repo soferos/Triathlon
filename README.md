@@ -119,6 +119,11 @@ the Claude API.
   point (the last ten are kept); the confirmation offers Undo and so does the Plan menu.
 - **Device sync state** — the app remembers what it last pushed to Intervals.icu and flags sessions
   in the next two weeks that have changed or been removed since, on the Plan page and in the menu.
+- **Unlink and relink activities** — if an activity was matched to the wrong session (an easy ride
+  that landed on the sweet spot), open the session and unlink it: the session is open again and goes
+  back to the day it was planned for, progression earned from the wrong grading is taken back, and
+  the activity stays an unplanned extra that syncs never re-link. Open any unplanned activity to link
+  it to the session it really was.
 - **Quick edits and review** — lengthen or shorten an aerobic session by 15 minutes, or make a hard
   one easy, from its dialog; the four weeks just gone stay viewable in the Plan.
 - **Goals** — performance, health, skill and life goals for the season and the long term.

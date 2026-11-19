@@ -215,11 +215,20 @@ function verdict(x) {
 }
 const extraCard = (a) => h('div', { class: `sess extra ${a.sport}`, onclick: () => extraDialog(a) },
   h('div', { class: 't' }, a.name), h('div', { class: 'm did' }, `Did: ${actualLine(a)}`), h('div', { class: 'm' }, `${a.type || SPORT[a.sport] || 'Activity'} · not in plan`));
+// Choose the planned session an activity really was; the session takes the activity's day and shows what you did.
+function linkPicker(a) {
+  const cands = S.sessions.filter((x) => x.sport === a.sport && !x.actual && x.status !== 'skipped' && Math.abs((toDate(x.date) - toDate(a.date)) / 864e5) <= 7)
+    .sort((x, y) => Math.abs(toDate(x.date) - toDate(a.date)) - Math.abs(toDate(y.date) - toDate(a.date)));
+  if (!cands.length) return h('p', { class: 'muted small' }, `No open ${SPORT[a.sport] || ''} session within a week of this one to link it to.`);
+  const pick = h('select', {}, cands.map((x) => h('option', { value: x.id }, `${fmtDate(x.date)} · ${x.workout.name} (${hm(x.workout.durationMin)})`)));
+  return h('div', { class: 'row', 'data-nodraft': '' }, field('Link it to', pick), btn('Link', () => act(() => api('POST', `/api/activities/${encodeURIComponent(a.id)}/link`, { sessionId: pick.value }), (r) => `Linked to “${r.name}”.`).then(() => $('#dlg').close()), 'primary'));
+}
 function extraDialog(a) {
   openDialog(a.sport, a.name, [
     h('div', { class: 'row', style: 'margin-bottom:10px' }, h('span', { class: 'pill' }, fmtDate(a.date, true)), h('span', { class: 'pill good' }, 'Completed'), h('span', { class: 'pill' }, a.type || a.sport)),
     h('p', {}, actualLine(a), a.intensity ? ` · IF ${a.intensity}` : ''),
-    h('p', { class: 'muted small' }, 'This activity was recorded in Intervals.icu but no planned session of this sport was close enough to match it (same week, within two days, broadly similar length). Its load still counts in your week and your fitness.'),
+    h('p', { class: 'muted small' }, 'This activity was recorded in Intervals.icu but is not linked to a planned session (none of this sport was close enough, or you unlinked it). Its load still counts in your week and your fitness.'),
+    linkPicker(a),
   ]);
 }
 function openDialog(cls, title, body) {
@@ -244,6 +253,9 @@ function sessionDialog(x) {
           h('td', { class: 'num' }, x.actual.np ? `${Math.round(x.actual.np)} W` : '–'), h('td', { class: 'num' }, x.actual.avgHr ? Math.round(x.actual.avgHr) : '–'), h('td', { class: 'num' }, x.actual.intensity ?? '–')),
         h('tr', {}, h('td', {}, 'Planned'), h('td', { class: 'num' }, hm(x.workout.durationMin)), h('td', { class: 'num' }, `${x.workout.tss} TSS`), h('td', {}, ''), h('td', {}, ''), h('td', {}, ''), h('td', {}, '')))),
       verdict(x) && h('div', { class: 'small', style: 'margin-top:6px' }, `Versus plan: ${verdict(x)}.`)),
+    x.actual?.activityId && h('div', { class: 'row', style: 'margin:0 0 10px' }, h('span', { class: 'muted small' }, 'Not the session you did?'),
+      btn('Unlink this activity', () => act(() => api('POST', `/api/sessions/${x.id}/unlink`, {}), (r) => `Unlinked${r.restoredDate ? ` — “${r.name}” is back on ${fmtDate(r.restoredDate)}` : ` — “${r.name}” is open again`}.`)
+        .then(() => { const y = S.sessions.find((q) => q.id === x.id); if (y) sessionDialog(y); }), 'sm')),
     x.actual?.exec && h('div', { class: `notice ${x.actual.exec.verdict === 'nailed' ? 'good' : x.actual.exec.verdict === 'unstructured' ? 'info' : ''}` },
       h('b', {}, `Execution: ${EXEC[x.actual.exec.verdict]}`), h('div', { class: 'small', style: 'margin-top:4px' }, x.actual.exec.text)),
     x.actual?.decoupling != null && !x.workout.hard && h('div', { class: `notice ${Math.abs(x.actual.decoupling) <= 5 ? 'good' : ''}` },

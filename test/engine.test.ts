@@ -278,3 +278,64 @@ test('availability: with no limits the plan lays out its optimal week; fixed day
   assert.ok(byDay(capped)[1] <= 45);
   assert.ok(capped.sessions.length >= best.sessions.length - 2);
 });
+
+test('unlink: an activity matched to the wrong session can be detached, stays detached, and the session is free to move', async () => {
+  const { unlinkSession, linkActivity, unplannedActivities } = await import('../src/engine/plan.ts');
+  const { analyzeExecution, applyProgress } = await import('../src/engine/execution.ts');
+  const s = emptyState();
+  s.profile = profile();
+  generate(s, '2027-01-04');
+  const sweet = s.sessions.find((x) => x.workout.code === 'bike.sweetspot')!;
+  const easyBike = s.sessions.find((x) => x.workout.code === 'bike.endurance' && x.date !== sweet.date && x.status === 'planned')!;
+  // Tuesday: an easy ride was done where the sweet spot was planned.
+  s.activities = [{ id: 'easy', date: sweet.date, sport: 'bike', name: 'Easy spin', durationMin: 55, tss: 38, distanceKm: 24, intensity: 0.64 }];
+  assert.equal(reconcile(s), 1);
+  assert.equal(sweet.actual?.activityId, 'easy');
+  assert.equal(sweet.status, 'done');
+  // grading it against the sweet spot earned a (negative) progression step
+  sweet.actual!.exec = { ...analyzeExecution(sweet, [{ type: 'WORK', moving_time: 600, average_watts: 150 }, { type: 'WORK', moving_time: 600, average_watts: 150 }], s.profile)!, verdict: 'under' };
+  s.progress = {};
+  applyProgress(s.progress, sweet.workout.code, sweet.actual!.exec);
+  assert.deepEqual(s.progress, { 'bike.sweetspot': -1 });
+
+  const r = unlinkSession(s, sweet.id);
+  assert.equal(r.name, sweet.workout.name);
+  assert.equal(sweet.actual, undefined);
+  assert.equal(sweet.status, 'planned');
+  assert.equal(sweet.locked, false, 'a plan session is the plan’s again');
+  assert.deepEqual(s.progress, {}, 'progression from the wrong grading is taken back');
+  assert.deepEqual(unplannedActivities(s, '2027-01-01').map((a) => a.id), ['easy']);
+  assert.throws(() => unlinkSession(s, sweet.id), /not linked/);
+  // the session can now be moved, and a later sync must not re-link the activity
+  const tuesday = sweet.date;
+  sweet.date = addDays(tuesday, 2);
+  assert.equal(reconcile(s), 0);
+  assert.equal(sweet.actual, undefined);
+  assert.equal(sweet.date, addDays(tuesday, 2), 'still where the athlete put it');
+  assert.deepEqual(s.unlinked, ['easy']);
+
+  // link it to the session it really was; the session takes the activity's day
+  const before = easyBike.date;
+  linkActivity(s, 'easy', easyBike.id);
+  assert.equal(easyBike.status, 'done');
+  assert.equal(easyBike.date, tuesday, 'the session takes the day the activity was done');
+  assert.equal(easyBike.actual!.activityId, 'easy');
+  assert.equal(easyBike.actual!.plannedDate, before);
+  assert.deepEqual(s.unlinked, []);
+  // same-sport rule and moving a link between sessions
+  const run = s.sessions.find((x) => x.sport === 'run' && x.status === 'planned')!;
+  assert.throws(() => linkActivity(s, 'easy', run.id), /same sport/);
+  linkActivity(s, 'easy', sweet.id);
+  assert.equal((sweet as import('../src/engine/types.ts').Session).actual!.activityId, 'easy');
+  assert.equal(easyBike.actual, undefined, 'the link moved rather than duplicating');
+  assert.equal(easyBike.status, 'planned');
+  // a session that moved because of matching goes back to where it was planned
+  const long = s.sessions.find((x) => x.role === 'long' && x.sport === 'run')!;
+  const planned = long.date;
+  s.activities.push({ id: 'lr', date: addDays(planned, -1), sport: 'run', name: 'Long run', durationMin: long.workout.durationMin, tss: long.workout.tss });
+  reconcile(s);
+  assert.equal(long.date, addDays(planned, -1));
+  const u = unlinkSession(s, long.id);
+  assert.equal(u.restoredDate, planned);
+  assert.equal(long.date, planned);
+});

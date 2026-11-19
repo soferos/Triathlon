@@ -273,3 +273,52 @@ test('undo, device sync state, quick edits, availability preview and duplicate r
   assert.equal(now.availability.days[0].minutes, null);
   assert.equal(now.weekStats[now.currentWeek].start, '2026-11-09');
 });
+
+test('unlink and link activities over the API; unlinked activities survive a sync and undo restores the link', async () => {
+  await api('POST', '/api/plan/generate', { scope: 'week' });
+  let { data } = await api('GET', '/api/state');
+  let x = data.sessions.find((s: any) => s.actual?.activityId === 'a1');
+  if (!x) {
+    const bike = data.sessions.find((s: any) => s.sport === 'bike' && s.status === 'planned' && !s.actual && s.date >= '2026-11-09');
+    assert.ok(bike, 'a bike session exists to link to');
+    assert.equal((await api('POST', '/api/activities/a1/link', { sessionId: bike.id })).status, 200);
+    data = (await api('GET', '/api/state')).data;
+    x = data.sessions.find((s: any) => s.id === bike.id);
+  }
+  assert.equal(x.status, 'done');
+  assert.equal(x.date, '2026-11-10');
+  const id = x.id;
+
+  assert.equal((await api('POST', '/api/sessions/nope/unlink', {})).status, 400);
+  const un = await api('POST', `/api/sessions/${id}/unlink`, {});
+  assert.equal(un.status, 200, JSON.stringify(un.data));
+  data = (await api('GET', '/api/state')).data;
+  const after = data.sessions.find((s: any) => s.id === id);
+  assert.equal(after.actual, undefined);
+  assert.equal(after.status, 'planned');
+  assert.ok(data.extras.some((a: any) => a.id === 'a1'), 'the activity is now an unplanned extra');
+  assert.match(data.undo.label, /Unlinking/);
+  assert.equal((await api('POST', `/api/sessions/${id}/unlink`, {})).status, 400, 'cannot unlink twice');
+
+  // a sync re-reads the activity but must not re-link it
+  await api('POST', '/api/intervals/sync', {});
+  data = (await api('GET', '/api/state')).data;
+  assert.equal(data.sessions.find((s: any) => s.id === id).actual, undefined);
+  assert.ok(data.extras.some((a: any) => a.id === 'a1'));
+
+  // linking rules
+  const run = data.sessions.find((s: any) => s.sport === 'run' && s.status === 'planned');
+  const wrong = await api('POST', '/api/activities/a1/link', { sessionId: run.id });
+  assert.equal(wrong.status, 400);
+  assert.match(wrong.data.error, /same sport/);
+  assert.equal((await api('POST', '/api/activities/missing/link', { sessionId: id })).status, 400);
+  assert.equal((await api('POST', '/api/activities/a1/link', { sessionId: id })).status, 200);
+  data = (await api('GET', '/api/state')).data;
+  assert.equal(data.sessions.find((s: any) => s.id === id).actual.activityId, 'a1');
+  assert.ok(!data.extras.some((a: any) => a.id === 'a1'));
+  // undo the manual link, then undo the unlink: back to the original link
+  await api('POST', '/api/undo', {});
+  assert.equal((await api('GET', '/api/state')).data.sessions.find((s: any) => s.id === id).actual, undefined);
+  await api('POST', '/api/undo', {});
+  assert.equal((await api('GET', '/api/state')).data.sessions.find((s: any) => s.id === id).actual?.activityId, 'a1');
+});

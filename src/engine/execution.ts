@@ -76,6 +76,13 @@ export function progressDelta(e: Execution): number {
   if (e.verdict === 'nailed' && (e.fade ?? 0) <= -6) return -1;
   return 0;
 }
+/** Take back the progression a graded session earned, e.g. when it turns out to have been matched to the wrong activity. */
+export function revertProgress(progress: Record<string, number>, code: string, e: Execution): void {
+  const k = progressKey(code), d = progressDelta(e);
+  if (!d) return;
+  const v = Math.max(-2, Math.min(2, (progress[k] ?? 0) - d));
+  if (v) progress[k] = v; else delete progress[k];
+}
 export function applyProgress(progress: Record<string, number>, code: string, e: Execution): number {
   const k = progressKey(code), d = progressDelta(e);
   if (d) progress[k] = Math.max(-2, Math.min(2, (progress[k] ?? 0) + d));
