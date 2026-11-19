@@ -184,11 +184,16 @@ function workoutDetail(w) {
   );
 }
 const meta = (w) => `${hm(w.durationMin)} · ${w.tss} TSS`;
+// The sessions a week is built around. Key = the quality sessions, long = the week's long ride and run;
+// tests and races count too. These are what the "Key sessions" count on Plan and Today measures.
+const ROLE_TAG = { key: 'KEY', long: 'LONG', test: 'TEST', race: 'RACE', brick: 'BRICK' };
+const ROLE_HELP = { key: 'A quality session the week is built around.', long: 'The week’s long ride or run: durability.', test: 'A threshold test: it recalibrates every target.', race: 'A race.', brick: 'Run straight off the bike.' };
+const roleTag = (x) => (ROLE_TAG[x.role] ? h('span', { class: `rtag ${x.role}`, title: ROLE_HELP[x.role] }, ROLE_TAG[x.role]) : null);
 function sessCard(x) {
   const missed = x.status === 'planned' && x.date < S.today;
   const a = x.actual;
   return h('div', { class: `sess ${x.sport} ${x.status} ${missed ? 'missed' : ''}`, onclick: () => sessionDialog(x) },
-    h('div', { class: 't' }, x.workout.name),
+    h('div', { class: 't' }, roleTag(x), x.workout.name),
     a ? [h('div', { class: 'm did' }, `Did: ${actualLine(a)}`), h('div', { class: 'm' }, `Planned ${meta(x.workout)}${verdict(x) ? ` · ${verdict(x)}` : ''}${a.exec && a.exec.verdict !== 'unstructured' ? ` · reps ${EXEC[a.exec.verdict]}` : ''}`)]
       : h('div', { class: 'm' }, `${SPORT[x.sport]} · ${meta(x.workout)}${x.origin === 'adapted' ? ' · adapted' : x.origin === 'custom' ? ' · custom' : ''}${missed ? ' · not done' : ''}`));
 }
@@ -250,7 +255,7 @@ function sessionDialog(x) {
   openDialog(x.sport, x.workout.name, [
     h('div', { class: 'row', style: 'margin-bottom:10px' },
       h('span', { class: 'pill' }, fmtDate(x.date, true)), h('span', { class: 'pill' }, meta(x.workout)),
-      x.workout.hard && h('span', { class: 'pill warn' }, 'Key intensity'), x.locked && h('span', { class: 'pill' }, 'Pinned'),
+      ROLE_TAG[x.role] && h('span', { class: `pill ${x.role === 'key' ? 'warn' : ''}`, title: ROLE_HELP[x.role] }, x.role === 'key' ? 'Key session' : x.role === 'long' ? 'Long session' : x.role === 'test' ? 'Test' : x.role === 'race' ? 'Race' : 'Brick'), x.workout.hard && x.role !== 'key' && h('span', { class: 'pill warn' }, 'Hard'), x.locked && h('span', { class: 'pill' }, 'Pinned'),
       x.status !== 'planned' && h('span', { class: `pill ${x.status === 'done' ? 'good' : ''}` }, x.status)),
     x.adaptedNote && h('div', { class: 'notice info' }, x.adaptedNote),
     x.actual && h('div', { class: 'notice good' },
@@ -331,7 +336,7 @@ function vToday() {
   const extrasToday = S.extras.filter((a) => a.date === t);
   const sessions = card('Today’s training',
     todays.map((x) => h('div', { class: x.sport, style: 'border-left:4px solid var(--c);padding-left:12px;margin-bottom:16px' },
-      h('div', { class: 'row' }, h('h3', { style: 'margin:0' }, x.workout.name), h('span', { class: 'pill' }, meta(x.workout)), x.status !== 'planned' && h('span', { class: `pill ${x.status === 'done' ? 'good' : ''}` }, x.status),
+      h('div', { class: 'row' }, h('h3', { style: 'margin:0' }, roleTag(x), x.workout.name), h('span', { class: 'pill' }, meta(x.workout)), x.status !== 'planned' && h('span', { class: `pill ${x.status === 'done' ? 'good' : ''}` }, x.status),
         h('button', { class: 'btn sm right', onclick: () => sessionDialog(x) }, 'Options')),
       x.adaptedNote && h('div', { class: 'muted small' }, x.adaptedNote),
       x.actual && h('div', { class: 'notice good', style: 'margin-top:6px' }, h('b', {}, 'Did: '), `${x.actual.name || 'activity'} — ${actualLine(x.actual)}${verdict(x) ? ` (${verdict(x)})` : ''}`),
@@ -389,6 +394,7 @@ function vPlan() {
       list.map(sessCard), extras.map(extraCard),
       !list.length && !extras.length && h('div', { class: 'muted small' }, cap != null && cap < 30 ? 'Unavailable' : 'Rest'));
   })));
+  out.push(h('p', { class: 'muted small' }, h('span', { class: 'rtag key' }, 'KEY'), ' quality session · ', h('span', { class: 'rtag long' }, 'LONG'), ' the week’s long ride or run · ', h('span', { class: 'rtag test' }, 'TEST'), ' threshold test · ', h('span', { class: 'rtag brick' }, 'BRICK'), ' run off the bike. Protect these first; if the week has to shrink, drop or shorten the untagged easy sessions before them. “Key sessions” in the totals counts KEY, LONG, TEST and races.'));
   if (current) out.push(adaptCards());
   for (const w of S.weekWarnings[wk.start] || []) out.push(h('div', { class: 'notice' }, w, ' ', h('a', { href: '#availability' }, 'Availability')));
   const sports = Object.entries(wk.bySport).sort((a, b) => b[1] - a[1]);

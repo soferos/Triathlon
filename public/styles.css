@@ -119,6 +119,13 @@ nav .syncing { font-weight: 400; margin-top: 2px; }
 .rbweek { flex: 1; min-width: 96px; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); }
 .rbweek.done { background: var(--panel2); border-color: var(--good); } .rbweek.current { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); } .rbweek.ahead { opacity: 0.6; }
 
+/* session role tags */
+.rtag { display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: 0.06em; padding: 1px 5px; border-radius: 4px; margin-right: 6px; vertical-align: 1px; background: var(--panel); border: 1px solid var(--line); color: var(--muted); }
+.rtag.key { background: var(--warn); border-color: var(--warn); color: #fff; }
+.rtag.long { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.rtag.test { background: var(--strength); border-color: var(--strength); color: #fff; }
+.rtag.race { background: var(--race); border-color: var(--race); color: #fff; }
+
 /* feedback */
 #toast { align-items: center; gap: 12px; }
 #toast .btn { background: transparent; color: inherit; border-color: currentColor; }
