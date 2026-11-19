@@ -95,7 +95,7 @@ const saveAndReplan = (method, path, body, msg) => act(async () => {
 // Five destinations; Progress and Setup hold sub-pages.
 const NAV = [['today', 'Today'], ['plan', 'Plan'], ['coach', 'Coach'], ['progress', 'Progress'], ['setup', 'Setup']];
 const GROUPS = {
-  progress: [['season', 'Season'], ['history', 'History'], ['insights', 'Insights']],
+  progress: [['overview', 'Overview'], ['season', 'Season'], ['history', 'History'], ['insights', 'Insights']],
   setup: [['profile', 'Profile & zones'], ['availability', 'Availability'], ['races', 'Races & goals'], ['workouts', 'Workouts'], ['strength', 'Strength'], ['connect', 'Connect'], ['method', 'Method']],
 };
 const groupOf = (v) => Object.keys(GROUPS).find((g) => GROUPS[g].some(([id]) => id === v));
@@ -127,7 +127,7 @@ function render() {
   const g = groupOf(view);
   if (g) lastSub[g] = view;
   renderNav();
-  const fn = { insights: vInsights, coach: vCoach, history: vHistory, today: vToday, plan: vPlan, season: vSeason, races: vRaces, availability: vAvailability, workouts: vWorkouts, strength: vStrength, profile: vProfile, connect: vConnect, method: vMethod }[view] || vToday;
+  const fn = { overview: vOverview, insights: vInsights, coach: vCoach, history: vHistory, today: vToday, plan: vPlan, season: vSeason, races: vRaces, availability: vAvailability, workouts: vWorkouts, strength: vStrength, profile: vProfile, connect: vConnect, method: vMethod }[view] || vToday;
   delete savers[view];
   const body = [fn()].flat(Infinity).filter((x) => x != null && x !== false);
   $('#main').replaceChildren(...[
@@ -204,6 +204,13 @@ function adaptCards() {
       h('div', { style: 'flex:1' }, h('b', {}, a.title), h('div', { class: 'small' }, a.detail), a.actions.length ? h('ul', { class: 'clean small', style: 'margin-top:4px' }, a.actions.map((t) => h('li', {}, t))) : null),
       h('button', { class: 'btn sm', onclick: () => act(() => api('POST', '/api/adapt/dismiss', { key: a.key }), 'Left as planned') }, a.actionable ? 'Keep as planned' : 'OK'))));
 }
+// Average intensity (IF) the plan prescribed for a session, from its load per hour, against what was done.
+const plannedIF = (x) => (x.workout.durationMin && x.workout.tss ? Math.round(Math.sqrt(x.workout.tss / (x.workout.durationMin / 60) / 100) * 100) / 100 : null);
+function intensityNote(x) {
+  const p = plannedIF(x), a = x.actual?.intensity;
+  if (!p || !a || x.sport === 'strength' || Math.abs(a - p) < 0.08) return null;
+  return a > p ? `Harder than prescribed: IF ${a} against ${p} planned${x.workout.hard ? '' : ' — an easy day was not easy'}.` : `Easier than prescribed: IF ${a} against ${p} planned${x.workout.hard ? ' — the quality was not there' : ''}.`;
+}
 const EXEC = { nailed: 'on target', over: 'above target', under: 'below target', 'cut short': 'cut short', unstructured: 'could not be graded' };
 const actualLine = (a) => [hm(a.durationMin || 0), a.distanceKm && `${a.distanceKm} km`, `${a.tss ?? 0} TSS`, a.np && `NP ${Math.round(a.np)} W`, a.avgHr && `${Math.round(a.avgHr)} bpm`].filter(Boolean).join(' · ');
 // How the completed session compares with the plan, by duration.
@@ -221,7 +228,7 @@ function linkPicker(a) {
     .sort((x, y) => Math.abs(toDate(x.date) - toDate(a.date)) - Math.abs(toDate(y.date) - toDate(a.date)));
   if (!cands.length) return h('p', { class: 'muted small' }, `No open ${SPORT[a.sport] || ''} session within a week of this one to link it to.`);
   const pick = h('select', {}, cands.map((x) => h('option', { value: x.id }, `${fmtDate(x.date)} · ${x.workout.name} (${hm(x.workout.durationMin)})`)));
-  return h('div', { class: 'row', 'data-nodraft': '' }, field('Link it to', pick), btn('Link', () => act(() => api('POST', `/api/activities/${encodeURIComponent(a.id)}/link`, { sessionId: pick.value }), (r) => `Linked to “${r.name}”.`).then(() => $('#dlg').close()), 'primary'));
+  return h('div', { class: 'row', 'data-nodraft': '' }, field('Link it to', pick), btn('Link', () => act(() => api('POST', `/api/activities/${encodeURIComponent(a.id)}/link`, { sessionId: pick.value }), (r) => `Linked to “${r.name}”.${r.graded ? ` Graded against the plan: ${EXEC[r.verdict]}.` : r.gradeError ? ` Could not grade it: ${r.gradeError}` : ''}`).then(() => $('#dlg').close()), 'primary'));
 }
 function extraDialog(a) {
   openDialog(a.sport, a.name, [
@@ -251,11 +258,13 @@ function sessionDialog(x) {
       h('table', { style: 'margin-top:6px' }, h('thead', {}, h('tr', {}, ['', 'Time', 'Load', 'Distance', 'NP', 'Avg HR', 'IF'].map((c) => h('th', {}, c)))), h('tbody', {},
         h('tr', {}, h('td', {}, h('b', {}, 'Did')), h('td', { class: 'num' }, hm(x.actual.durationMin || 0)), h('td', { class: 'num' }, `${x.actual.tss ?? 0} TSS`), h('td', { class: 'num' }, x.actual.distanceKm ? `${x.actual.distanceKm} km` : '–'),
           h('td', { class: 'num' }, x.actual.np ? `${Math.round(x.actual.np)} W` : '–'), h('td', { class: 'num' }, x.actual.avgHr ? Math.round(x.actual.avgHr) : '–'), h('td', { class: 'num' }, x.actual.intensity ?? '–')),
-        h('tr', {}, h('td', {}, 'Planned'), h('td', { class: 'num' }, hm(x.workout.durationMin)), h('td', { class: 'num' }, `${x.workout.tss} TSS`), h('td', {}, ''), h('td', {}, ''), h('td', {}, ''), h('td', {}, '')))),
-      verdict(x) && h('div', { class: 'small', style: 'margin-top:6px' }, `Versus plan: ${verdict(x)}.`)),
+        h('tr', {}, h('td', {}, 'Planned'), h('td', { class: 'num' }, hm(x.workout.durationMin)), h('td', { class: 'num' }, `${x.workout.tss} TSS`), h('td', {}, ''), h('td', {}, ''), h('td', {}, ''), h('td', { class: 'num' }, plannedIF(x) ?? '')))),
+      verdict(x) && h('div', { class: 'small', style: 'margin-top:6px' }, `Versus plan: ${verdict(x)}.`),
+      intensityNote(x) && h('div', { class: 'small', style: 'margin-top:4px' }, intensityNote(x))),
     x.actual?.activityId && h('div', { class: 'row', style: 'margin:0 0 10px' }, h('span', { class: 'muted small' }, 'Not the session you did?'),
       btn('Unlink this activity', () => act(() => api('POST', `/api/sessions/${x.id}/unlink`, {}), (r) => `Unlinked${r.restoredDate ? ` — “${r.name}” is back on ${fmtDate(r.restoredDate)}` : ` — “${r.name}” is open again`}.`)
-        .then(() => { const y = S.sessions.find((q) => q.id === x.id); if (y) sessionDialog(y); }), 'sm')),
+        .then(() => { const y = S.sessions.find((q) => q.id === x.id); if (y) sessionDialog(y); }), 'sm'),
+      x.workout.hard && btn(x.actual.exec ? 'Re-grade' : 'Grade the reps', () => act(() => api('POST', `/api/sessions/${x.id}/regrade`, {}), (r) => `Graded: ${EXEC[r.verdict] ?? 'done'}.`).then(() => { const y = S.sessions.find((q) => q.id === x.id); if (y) sessionDialog(y); }), 'sm')),
     x.actual?.exec && h('div', { class: `notice ${x.actual.exec.verdict === 'nailed' ? 'good' : x.actual.exec.verdict === 'unstructured' ? 'info' : ''}` },
       h('b', {}, `Execution: ${EXEC[x.actual.exec.verdict]}`), h('div', { class: 'small', style: 'margin-top:4px' }, x.actual.exec.text)),
     x.actual?.decoupling != null && !x.workout.hard && h('div', { class: `notice ${Math.abs(x.actual.decoupling) <= 5 ? 'good' : ''}` },
@@ -865,6 +874,71 @@ function debriefCard() {
     h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { class: `btn ${stale ? 'primary' : ''} ${debriefing ? 'busy' : ''}`, disabled: debriefing, onclick: runDebrief }, debriefing ? 'Writing…' : d ? 'Write a new one' : 'Write my debrief'),
       d && btn('Discuss with coach', () => go('coach'))));
 }
+// ---------------- Progress overview ----------------
+function vOverview() {
+  const O = S.overview, F = O.fitness, R = O.rebuild, L = O.levels;
+  const out = [page('Progress overview', 'The evidence behind your plan: where your fitness is against what the plan assumed, how far through the rebuild you are, which workout types have moved up or down, and what your thresholds are doing.')];
+  if (L.pending.length) out.push(h('div', { class: 'notice' }, h('b', {}, 'Progression has changed since the plan was built: '), `${L.pending.join(', ')}. Upcoming sessions of those types still use the old levels until the plan is regenerated (it happens automatically each Monday).`,
+    h('div', { style: 'margin-top:8px' }, btn('Re-plan future weeks now', () => act(() => api('POST', '/api/plan/generate', {}), 'Future weeks re-planned with your current progression'), 'primary'))));
+
+  // --- fitness against plan ---
+  const W = 960, H = 230, padL = 36, padB = 26, padT = 12;
+  const pts = F.weeks, n = Math.max(1, pts.length - 1);
+  const vals = pts.flatMap((w) => [w.planned, w.actual]).filter((v) => v != null);
+  const max = Math.max(20, ...vals) * 1.1, x = (i) => padL + (i / n) * (W - padL - 8), y = (v) => padT + (H - padT - padB) * (1 - v / max);
+  const g = svg('svg', { viewBox: `0 0 ${W} ${H}`, style: 'width:100%;height:auto', role: 'img', 'aria-label': 'Fitness against the plan' });
+  for (const t of [0.5, 1]) { const v = Math.round((max / 1.1) * t / 10) * 10; g.append(svg('line', { x1: padL, x2: W, y1: y(v), y2: y(v), stroke: 'var(--line)' }), svg('text', { x: 2, y: y(v) + 4 }, v)); }
+  const line = (key, filter, attrs) => { const seg = pts.map((w, i) => (filter(w) && w[key] != null ? `${x(i)},${y(w[key])}` : null)).filter(Boolean); if (seg.length > 1) g.append(svg('polyline', { fill: 'none', 'stroke-width': 2.5, points: seg.join(' '), ...attrs })); };
+  const todayIdx = pts.findIndex((w) => w.future);
+  if (todayIdx > 0) g.append(svg('line', { x1: x(todayIdx - 0.5), x2: x(todayIdx - 0.5), y1: padT, y2: H - padB, stroke: 'var(--muted)', 'stroke-dasharray': '2 4' }), svg('text', { x: x(todayIdx - 0.5) + 4, y: padT + 10 }, 'now'));
+  line('planned', (w) => !w.future, { stroke: 'var(--accent)', 'stroke-dasharray': '6 4' });
+  line('planned', (w) => w.future || w.start === pts[todayIdx - 1]?.start, { stroke: 'var(--accent)', opacity: 0.45, 'stroke-dasharray': '2 4' });
+  line('actual', (w) => !w.future, { stroke: 'var(--text)' });
+  pts.forEach((w, i) => { if (+w.start.slice(8) <= 7) g.append(svg('text', { x: x(i), y: H - 8 }, MONTHS[+w.start.slice(5, 7) - 1])); });
+  out.push(card('Fitness against the plan',
+    h('p', {}, F.text), g,
+    h('div', { class: 'legend' }, h('span', {}, h('i', { style: 'background:var(--text);height:3px' }), 'Your fitness (CTL)'), h('span', {}, h('i', { style: 'background:var(--accent);height:3px' }), 'What the plan assumed'), h('span', {}, h('i', { style: 'background:var(--accent);opacity:.45;height:3px' }), 'Projection from here')),
+    F.now != null && h('p', { class: 'muted small', style: 'margin-top:6px' }, `Fitness now: ${F.now}.`)));
+
+  // --- rebuild block ---
+  if (R) out.push(card('Return-to-training block',
+    R.total ? [
+      h('div', { class: 'row', style: 'margin-bottom:10px' }, R.weeks.map((w) => h('div', { class: `rbweek ${w.state}`, title: w.start ? `Week of ${fmtDate(w.start)}${w.targetTss ? ` · ${w.doneTss} of ${w.targetTss} TSS` : ` · ${w.doneTss} TSS`}` : '' },
+        h('b', {}, `Week ${w.n}`), h('div', { class: 'small' }, w.state === 'done' ? (w.targetTss ? `${Math.round((w.doneTss / w.targetTss) * 100)}% of plan` : `${hm(w.doneHours * 60)}`) : w.state === 'current' ? 'this week' : 'to come')))),
+      h('p', {}, R.done ? 'The block is complete: intensity and normal progression are in play.' : `Week ${Math.min(R.served + 1, R.total)} of ${R.total}. Frequency first, then volume, then intensity — run intensity last.`),
+      R.checks.map((c) => h('div', { class: 'signal' }, h('span', { class: `pill ${c.ok ? 'good' : ''}` }, c.ok ? '✓' : '○'), h('div', {}, h('b', {}, c.label), h('div', { class: 'muted small' }, c.detail)))),
+      h('p', { class: 'muted small', style: 'margin-top:8px' }, R.from ? `Counted from ${fmtDate(R.from, true)}. If that is wrong, set “Resumed training on” under Profile.` : R.note),
+    ] : h('p', { class: 'muted' }, R.note)));
+
+  // --- workout-type levels ---
+  const phrase = (o) => (o === 0 ? 'on the calendar' : `${Math.abs(o)} level${Math.abs(o) === 1 ? '' : 's'} ${o > 0 ? 'ahead' : 'back'}`);
+  out.push(card('Where each workout type stands',
+    h('p', { class: 'muted small' }, 'After a key session is graded rep by rep: beat the targets with every rep done and the next session of that type skips a level; miss them and it steps back (at most two either way).'),
+    L.ungraded > 0 && h('div', { class: 'notice info' }, `${L.ungraded} of ${L.hardDone} hard sessions in the last three weeks could not be graded rep by rep. Intervals.icu needs laps or detected intervals in the activity; open the session and press Re-grade once they exist.`),
+    L.rows.length ? h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['Workout type', 'Level', 'Next session', 'Recent sessions'].map((c) => h('th', {}, c)))), h('tbody', {}, L.rows.map((r) => h('tr', {},
+      h('td', {}, h('b', {}, r.label)),
+      h('td', {}, h('span', { class: `pill ${r.offset > 0 ? 'good' : r.offset < 0 ? 'warn' : ''}` }, phrase(r.offset)), r.offset !== r.planned && h('div', { class: 'small muted' }, 'not in the plan yet')),
+      h('td', { class: 'small' }, r.next ? [h('div', {}, r.next.name), h('div', { class: 'muted' }, fmtDate(r.next.date))] : h('span', { class: 'muted' }, 'none planned')),
+      h('td', { class: 'small' }, r.history.length ? h('details', {}, h('summary', {}, `${r.history.length} graded`), r.history.map((e) => h('div', { style: 'margin:6px 0' }, h('b', {}, `${fmtDate(e.date)} · ${e.name}`), e.delta ? h('span', { class: `pill ${e.delta > 0 ? 'good' : 'warn'}`, style: 'margin-left:6px' }, e.delta > 0 ? '+1' : '−1') : null, h('div', { class: 'muted' }, e.text)))) : h('span', { class: 'muted' }, '—')))))))
+      : h('p', { class: 'muted' }, L.graded ? 'Sessions have been graded, but none has moved a level yet — each is still on the calendar’s level.' : 'Nothing graded yet. Key sessions are graded after each sync; none has been matched with intervals so far.')));
+
+  // --- thresholds ---
+  const fmtT = (t, v) => (v == null ? '—' : t.unit === 'pace' ? `${clock(v)}${t.key === 'cssSecPer100' ? '/100m' : '/km'}` : `${Math.round(v)} ${t.unit}`);
+  const spark = (t) => { if (t.points.length < 2) return h('span', { class: 'muted small' }, 'no change recorded'); const a = t.points, vs = a.map((p) => p.value), lo = Math.min(...vs), hi = Math.max(...vs, lo + 1), t0 = toDate(a[0].date).getTime(), t1 = Math.max(toDate(a.at(-1).date).getTime(), t0 + 864e5);
+    // Pace improves downwards; flip the axis so up always means better.
+    const yy = (v) => 4 + 28 * (t.unit === 'pace' ? (v - lo) / (hi - lo) : 1 - (v - lo) / (hi - lo)), xx = (d) => 2 + ((toDate(d).getTime() - t0) / (t1 - t0)) * 116;
+    const e = svg('svg', { viewBox: '0 0 120 36', width: 120, height: 36, role: 'img', 'aria-label': `${t.label} over time` });
+    e.append(svg('polyline', { fill: 'none', stroke: 'var(--accent)', 'stroke-width': 2, points: a.map((p) => `${xx(p.date)},${yy(p.value)}`).join(' ') })); return e; };
+  out.push(card('Thresholds',
+    h('p', { class: 'muted small' }, 'Every target in the plan is a fraction of these. Bike FTP has a history from your activities; the others are recorded from the first time they were set here, so their trend fills in as they change.'),
+    O.thresholds.length ? h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['', 'Now', 'Three months ago', 'Change', 'Trend'].map((c) => h('th', {}, c)))), h('tbody', {}, O.thresholds.map((t) => {
+      const better = t.changePct == null ? null : t.unit === 'pace' ? t.changePct < 0 : t.changePct > 0;
+      return h('tr', {}, h('td', {}, h('b', {}, t.label)), h('td', { class: 'num' }, fmtT(t, t.current)), h('td', { class: 'num' }, fmtT(t, t.before)),
+        h('td', { class: 'num' }, t.changePct == null || t.changePct === 0 ? h('span', { class: 'muted' }, '—') : h('span', { style: `color:var(--${better ? 'good' : 'warn'})` }, `${t.changePct > 0 ? '+' : ''}${t.changePct}%`)), h('td', {}, spark(t)));
+    })))) : h('p', { class: 'muted' }, 'No thresholds set yet. Add them under Profile or sync from Intervals.icu.')));
+  return out;
+}
+
 function vInsights() {
   const I = S.insights, out = [page('Insights', 'What your own data says: against your pre-break self, your target, and your history.')];
   const aRace = S.races.filter((r) => r.priority === 'A' && r.date >= S.today).sort((a, b) => a.date.localeCompare(b.date))[0];

@@ -115,6 +115,13 @@ the Claude API.
 - **Training history** — the first sync imports every activity back to your first one (later syncs
   refresh the last 60 days): weekly volume by sport, all-time fitness curve, yearly totals, longest
   sessions, and a filterable activity list.
+- **Progress overview** — Progress → Overview gathers the evidence behind plan changes: fitness
+  against what the plan assumed (the plan's projection for each week is recorded the first time it
+  is made), progress through the return-to-training block with its exit checks, the progression
+  level of each workout type with the graded sessions that moved it and what a re-plan would change,
+  and a trend for each threshold (bike FTP from your activities, the rest from when they were set).
+- **Grading on link** — linking an activity grades it against the session's targets straight away,
+  a session can be re-graded, and "could not be graded" is retried for a week after a sync.
 - **Undo** — re-plans, applied adjustments, coach changes, quick edits and deletions leave an undo
   point (the last ten are kept); the confirmation offers Undo and so does the Plan menu.
 - **Device sync state** — the app remembers what it last pushed to Intervals.icu and flags sessions

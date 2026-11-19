@@ -251,3 +251,81 @@ test('past race: links the day’s activities, fits CdA and race intensities, an
   assert.equal(none.usable, false);
   assert.equal(none.legs[0].source, 'missing');
 });
+
+test('rebuild block: counts from the plan start and ends instead of restarting every week', async () => {
+  const s = emptyState();
+  s.profile = { ...P(), comeback: { active: true, weeksOff: 6 } };
+  generate(s, '2026-11-09');
+  assert.equal(s.profile.comeback.planStart, '2026-11-09');
+  assert.equal(s.season!.weeks.filter((w) => w.phase === 'rebuild').length, 3);
+  generate(s, '2026-11-23', 'future'); // two weeks later: two of the block's three weeks have been served
+  assert.equal(s.season!.weeks.filter((w) => w.phase === 'rebuild').length, 1);
+  generate(s, '2026-12-07', 'future'); // the block is over
+  assert.equal(s.season!.weeks.filter((w) => w.phase === 'rebuild').length, 0);
+  assert.equal(s.season!.weeks[0].phase, 'base');
+});
+
+test('progress overview: plan trace, rebuild checks, levels with history, pending re-plan and threshold trend', async () => {
+  const { progressOverview } = await import('../src/engine/progress.ts');
+  const { recordThresholds } = await import('../src/engine/plan.ts');
+  const s = emptyState();
+  s.profile = { ...P(), comeback: { active: true, weeksOff: 6 } };
+  generate(s, '2026-11-09');
+  const trace = { ...s.planTrace! };
+  assert.ok(Object.keys(trace).length >= 12, String(Object.keys(trace).length)); // no races: a 16-week general cycle
+  generate(s, '2026-11-16'); // a later projection never rewrites what was first assumed
+  assert.deepEqual(Object.fromEntries(Object.entries(s.planTrace!).filter(([k]) => k in trace)), trace);
+
+  // actual fitness: two weeks behind the plan's projection
+  const today = '2026-11-30';
+  for (let d = '2026-11-09'; d <= today; d = addDays(d, 1)) s.wellness.push({ date: d, ctl: trace['2026-11-09'].ctl - 6, atl: 40 });
+  let o = progressOverview(s, today);
+  const wk = o.fitness.weeks.find((w) => w.start === '2026-11-16')!;
+  assert.equal(wk.future, false);
+  assert.equal(wk.actual, Math.round((trace['2026-11-09'].ctl - 6) * 10) / 10);
+  assert.ok(o.fitness.gap! < -2, `behind plan: ${o.fitness.gap}`);
+  assert.match(o.fitness.text, /behind the plan/);
+
+  // rebuild: 3 weeks from 9 Nov; on 30 Nov two weeks done and the third running
+  const r = o.rebuild!;
+  assert.deepEqual([r.total, r.served, r.done], [3, 3, true]);
+  o = progressOverview(s, '2026-11-24');
+  assert.equal(o.rebuild!.served, 2);
+  assert.deepEqual(o.rebuild!.weeks.map((w) => w.state), ['done', 'done', 'current']);
+  assert.equal(o.rebuild!.checks[0].ok, false);
+  s.niggles = [{ id: 'n', date: '2026-11-20', area: 'Achilles', sport: 'run', severity: 2 }];
+  assert.equal(progressOverview(s, '2026-11-24').rebuild!.checks[2].ok, false);
+
+  // levels: a graded session moved bike threshold; the plan still uses the old level until a re-plan
+  s.progress = { 'bike.threshold': 1 };
+  s.progressLog = [{ id: 'a1', date: '2026-11-20', key: 'bike.threshold', delta: 1, name: 'Threshold 4×8 min', verdict: 'over' }];
+  const th = { id: 's9', date: '2026-11-20', sport: 'bike' as const, role: 'key' as const, workout: { ...bike.threshold(75, 0, s.profile) }, status: 'done' as const, locked: true, origin: 'plan' as const,
+    actual: { activityId: 'a1', name: 'Threshold ride', durationMin: 76, tss: 70, exec: { verdict: 'over' as const, plannedReps: 4, doneReps: 4, lo: 0.96, hi: 1.02, avg: 1.07, text: 'Reps averaged 107%.' } } };
+  s.sessions.push(th);
+  o = progressOverview(s, '2026-11-24');
+  const row = o.levels.rows.find((x) => x.key === 'bike.threshold')!;
+  assert.equal(row.offset, 1);
+  assert.equal(row.planned, 0);
+  assert.equal(row.history[0].delta, 1);
+  assert.deepEqual(o.levels.pending, ['Bike · threshold']);
+  generate(s, '2026-11-23');
+  assert.deepEqual(progressOverview(s, '2026-11-24').levels.pending, [], 'a re-plan picks the new level up');
+
+  // thresholds: bike FTP history comes from activities, the rest from the log
+  s.activities = [{ id: 'x1', date: '2026-06-01', sport: 'bike', name: 'a', durationMin: 60, tss: 50, ftp: 270 }, { id: 'x2', date: '2026-10-20', sport: 'bike', name: 'b', durationMin: 60, tss: 50, ftp: 280 }];
+  s.thresholdLog = [];
+  s.profile.ftp = 285; s.profile.runPaceSecPerKm = 235;
+  recordThresholds(s, '2026-11-01');
+  s.profile.runPaceSecPerKm = 228;
+  recordThresholds(s, '2026-11-20');
+  recordThresholds(s, '2026-11-20'); // unchanged: no duplicate entry
+  const t = progressOverview(s, '2026-11-24').thresholds;
+  const ftp = t.find((x) => x.key === 'ftp')!;
+  assert.deepEqual(ftp.points.map((p) => p.value), [270, 280, 285], 'activities give 270 then 280; the log adds the 285 now in force');
+  assert.equal(ftp.before, 270);
+  assert.equal(t.find((x) => x.key === 'runPaceSecPerKm')!.before, null, 'a history shorter than three months has nothing to compare with');
+  assert.equal(ftp.changePct, 5.6);
+  const pace = t.find((x) => x.key === 'runPaceSecPerKm')!;
+  assert.deepEqual(pace.points.map((p) => p.value), [235, 228]);
+  assert.equal(s.thresholdLog!.filter((e) => e.date === '2026-11-20').length, 1);
+});

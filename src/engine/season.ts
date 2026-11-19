@@ -84,7 +84,8 @@ export function buildSeason(input: SeasonInput): { weeks: SeasonWeek[]; warnings
   // 1. Return-to-training block (never skipped, only shortened by time already served).
   let cursor = 0;
   if (profile.comeback.active) {
-    const served = profile.comeback.resumedOn ? Math.max(0, Math.floor(diffDays(start, profile.comeback.resumedOn) / 7)) : 0;
+    const from = profile.comeback.resumedOn ?? profile.comeback.planStart;
+    const served = from ? Math.max(0, Math.floor(diffDays(start, from) / 7)) : 0;
     const owed = Math.max(0, rebuildWeeks(profile.comeback.weeksOff) - served);
     for (let i = 0; i < Math.min(owed, n); i++) phases[i] = 'rebuild';
     cursor = Math.min(owed, n);

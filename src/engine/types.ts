@@ -38,7 +38,8 @@ export interface Profile {
   learnedRamp?: number;
   recoveryCycle: 'auto' | '3:1' | '2:1';
   restDay: boolean;
-  comeback: { active: boolean; weeksOff: number; resumedOn?: string; note?: string };
+  /** planStart: the Monday the rebuild block began in this plan, used when resumedOn is not set */
+  comeback: { active: boolean; weeksOff: number; resumedOn?: string; note?: string; planStart?: string };
   strengthEquipment: 'gym' | 'home';
   autoThresholds: boolean;
   /** Apply load/missed-session adaptations automatically after each sync instead of proposing them */

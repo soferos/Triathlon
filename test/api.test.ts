@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 
 // A fake Intervals.icu that records what the app sends.
-const icu = { events: [] as any[], calls: [] as string[], auth: '' };
+const icu = { events: [] as any[], calls: [] as string[], auth: '', intervals: [] as any[] };
 let fake: Server, app: Server, base: string, dir: string;
 const TODAY = '2026-11-11';
 
@@ -28,6 +28,7 @@ before(async () => {
         { types: ['Swim'], threshold_pace: 1.0989 },
       ] });
     }
+    if (req.method === 'GET' && /\/activity\/[^/]+\/intervals$/.test(url.pathname)) return json(200, { icu_intervals: icu.intervals });
     const oldest = url.searchParams.get('oldest') ?? '', newest = url.searchParams.get('newest') ?? '';
     const inRange = (d: string) => d.slice(0, 10) >= oldest && d.slice(0, 10) <= newest;
     if (req.method === 'GET' && path === '/wellness') {
@@ -321,4 +322,42 @@ test('unlink and link activities over the API; unlinked activities survive a syn
   assert.equal((await api('GET', '/api/state')).data.sessions.find((s: any) => s.id === id).actual, undefined);
   await api('POST', '/api/undo', {});
   assert.equal((await api('GET', '/api/state')).data.sessions.find((s: any) => s.id === id).actual?.activityId, 'a1');
+});
+
+test('linking an activity grades it against the plan immediately, and it can be re-graded', async () => {
+  const mk = (watts: number, n = 4) => Array.from({ length: n }, () => ({ type: 'WORK', moving_time: 480, average_watts: watts }));
+  // a custom 4×8 threshold session on the day of the recorded ride (activity a1, 2026-11-10)
+  const add = await api('POST', '/api/sessions', { date: '2026-11-10', workout: { sport: 'bike', name: 'Custom 4x8', blocks: [
+    { name: 'Warm-up', repeat: 1, steps: [{ kind: 'warmup', secs: 600, lo: 0.5, hi: 0.7 }] },
+    { name: 'Main', repeat: 4, steps: [{ kind: 'work', secs: 480, lo: 0.97, hi: 1.02 }, { kind: 'recovery', secs: 180, lo: 0.5, hi: 0.55 }] },
+  ] } });
+  assert.equal(add.status, 200);
+  icu.intervals = mk(282); // 99% of the 285 W FTP
+  const link = await api('POST', '/api/activities/a1/link', { sessionId: add.data.id });
+  assert.equal(link.status, 200, JSON.stringify(link.data));
+  assert.equal(link.data.graded, true);
+  assert.equal(link.data.verdict, 'nailed');
+  let { data } = await api('GET', '/api/state');
+  let x = data.sessions.find((s: any) => s.id === add.data.id);
+  assert.equal(x.actual.exec.verdict, 'nailed');
+  assert.equal(x.actual.exec.doneReps, 4);
+  assert.deepEqual(data.overview.levels.rows.filter((r: any) => r.key === 'custom'), [], 'custom workouts have no level to move');
+
+  // intervals appear later in Intervals.icu (laps added): re-grade replaces the verdict
+  icu.intervals = [];
+  assert.equal((await api('POST', `/api/sessions/${add.data.id}/regrade`, {})).data.verdict, 'unstructured');
+  icu.intervals = mk(305);
+  const re = await api('POST', `/api/sessions/${add.data.id}/regrade`, {});
+  assert.equal(re.data.verdict, 'over');
+  x = (await api('GET', '/api/state')).data.sessions.find((s: any) => s.id === add.data.id);
+  assert.equal(x.actual.exec.verdict, 'over');
+  // a session with nothing to grade against says so
+  const easy = data.sessions.find((s: any) => s.actual && !s.workout.hard && s.id !== add.data.id);
+  if (easy) assert.equal((await api('POST', `/api/sessions/${easy.id}/regrade`, {})).status, 400);
+  // an unstructured result is retried on the next sync while the activity is recent
+  icu.intervals = [];
+  await api('POST', `/api/sessions/${add.data.id}/regrade`, {});
+  icu.intervals = mk(280);
+  await api('POST', '/api/intervals/sync', {});
+  assert.ok(['nailed', 'unstructured'].includes((await api('GET', '/api/state')).data.sessions.find((s: any) => s.id === add.data.id).actual.exec.verdict));
 });

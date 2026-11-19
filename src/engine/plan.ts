@@ -5,6 +5,7 @@ import { courseDemands, gapAnalysis, predictRace } from './course.ts';
 import { comebackTracker, learnedRamp } from './insights.ts';
 import { analyzeRace, personalModel } from './raceanalysis.ts';
 import { revertProgress } from './execution.ts';
+import { progressOverview } from './progress.ts';
 import { addDays, diffDays, mondayOf } from './dates.ts';
 import { buildSeason } from './season.ts';
 import { buildWeek } from './week.ts';
@@ -17,6 +18,20 @@ import { summarizeHistory } from './history.ts';
 import { proposeAdaptations } from './adapt.ts';
 
 export const DETAIL_WEEKS = 4;
+
+export interface ThresholdEntry { date: string; ftp?: number; runPower?: number; runPaceSecPerKm?: number; cssSecPer100?: number; bikeLthr?: number; runLthr?: number }
+const THRESHOLD_KEYS = ['ftp', 'runPower', 'runPaceSecPerKm', 'cssSecPer100', 'bikeLthr', 'runLthr'] as const;
+/** Append the current thresholds to the log if any differ from the last entry. */
+export function recordThresholds(s: State, today: string): void {
+  const p = s.profile, log = (s.thresholdLog ??= []);
+  const cur: ThresholdEntry = { date: today };
+  for (const k of THRESHOLD_KEYS) if (p[k]) cur[k] = p[k];
+  if (!THRESHOLD_KEYS.some((k) => cur[k])) return;
+  const last = log.at(-1);
+  if (last && THRESHOLD_KEYS.every((k) => last[k] === cur[k])) return;
+  if (last && last.date === today) log[log.length - 1] = cur; else log.push(cur);
+  if (log.length > 300) log.shift();
+}
 
 export interface State {
   profile: Profile;
@@ -47,10 +62,18 @@ export interface State {
   progress?: Record<string, number>;
   /** Activities the athlete unlinked from a session: never matched automatically again */
   unlinked?: string[];
+  /** Each time grading moved a progression level: which session, which way */
+  progressLog?: { id: string; date: string; key: string; delta: number; name: string; verdict: string }[];
+  /** Progression levels in force when the plan was last generated, to show what a re-plan would change */
+  progressAtPlan?: Record<string, number>;
+  /** The plan's own projection per week, recorded the first time it made one: fitness and load */
+  planTrace?: Record<string, { ctl: number; tss: number; hours: number }>;
+  /** Thresholds over time, appended whenever one changes */
+  thresholdLog?: ThresholdEntry[];
   niggles?: Niggle[];
   debrief?: { week: string; text: string; at: string };
   /** Snapshots taken before plan-changing actions, newest last, for Undo */
-  undo?: { label: string; at: string; sessions: Session[]; overrides: Availability['overrides']; dismissedAdapt: string[]; progress: Record<string, number>; unlinked: string[] }[];
+  undo?: { label: string; at: string; sessions: Session[]; overrides: Availability['overrides']; dismissedAdapt: string[]; progress: Record<string, number>; unlinked: string[]; progressLog: NonNullable<State['progressLog']> }[];
 }
 
 export const emptyState = (): State => ({
@@ -74,10 +97,17 @@ export function currentCtl(s: State): number | undefined {
 export function generate(s: State, today: string, scope: 'future' | 'week' = 'future'): void {
   // Keep the athlete's own sustainable ramp current; it is only used when they opt in ('learned').
   s.profile.learnedRamp = learnedRamp(s.wellness)?.suggested;
+  // The rebuild block counts from the Monday this plan first started it, so it ends instead of restarting every week.
+  if (s.profile.comeback.active && !s.profile.comeback.resumedOn && !s.profile.comeback.planStart) s.profile.comeback.planStart = mondayOf(today);
+  recordThresholds(s, today);
   const season = buildSeason({ today, profile: s.profile, availability: s.availability, races: s.races, ctl: currentCtl(s) });
   // Attach what the target course demands, and how far out the race is, to each week.
   const model = personalModel(s.races, s.activities, s.profile, today);
   const demands = new Map(s.races.map((r) => [r.id, courseDemands(r, s.profile, model)]));
+  // Remember what the plan assumed for each week the first time it did, so reality can be compared with it later.
+  const trace = (s.planTrace ??= {});
+  for (const w of season.weeks) if (!(w.start in trace)) trace[w.start] = { ctl: w.ctlEnd, tss: w.targetTss, hours: w.targetHours };
+  s.progressAtPlan = { ...(s.progress ?? {}) };
   for (const w of season.weeks) {
     const race = s.races.find((r) => r.id === w.targetRaceId);
     if (!race || race.date < w.start) continue;
@@ -110,7 +140,7 @@ export function generate(s: State, today: string, scope: 'future' | 'week' = 'fu
 
 /** Remember the plan as it is now, so the next change can be undone. */
 export function snapshot(s: State, label: string): void {
-  (s.undo ??= []).push({ label, at: new Date().toISOString(), sessions: structuredClone(s.sessions), overrides: structuredClone(s.availability.overrides), dismissedAdapt: [...(s.dismissedAdapt ?? [])], progress: { ...(s.progress ?? {}) }, unlinked: [...(s.unlinked ?? [])] });
+  (s.undo ??= []).push({ label, at: new Date().toISOString(), sessions: structuredClone(s.sessions), overrides: structuredClone(s.availability.overrides), dismissedAdapt: [...(s.dismissedAdapt ?? [])], progress: { ...(s.progress ?? {}) }, unlinked: [...(s.unlinked ?? [])], progressLog: structuredClone(s.progressLog ?? []) });
   if (s.undo.length > 10) s.undo.shift();
 }
 /** Drop the newest snapshot when the action it guarded changed nothing. */
@@ -123,6 +153,7 @@ export function undo(s: State): string | null {
   s.dismissedAdapt = snap.dismissedAdapt;
   s.progress = snap.progress;
   s.unlinked = snap.unlinked;
+  s.progressLog = snap.progressLog;
   return snap.label;
 }
 
@@ -245,6 +276,7 @@ export function unlinkSession(s: State, id: string): { name: string; restoredDat
   if (!x?.actual?.activityId) throw new Error('This session is not linked to an activity.');
   const a = x.actual;
   if (a.exec) revertProgress((s.progress ??= {}), x.workout.code, a.exec);
+  s.progressLog = (s.progressLog ?? []).filter((e) => e.id !== a.activityId);
   (s.unlinked ??= []).includes(a.activityId!) || s.unlinked.push(a.activityId!);
   const restoredDate = a.plannedDate && a.plannedDate !== x.date ? a.plannedDate : undefined;
   if (restoredDate) x.date = restoredDate;
@@ -445,6 +477,7 @@ export function viewState(s: State, today: string) {
       ramp: cached('ramp', dataKey, () => learnedRamp(s.wellness)),
       progress: s.progress ?? {},
     },
+    overview: progressOverview(s, today),
     niggles: (s.niggles ?? []).filter((n) => !n.resolved),
     debrief: s.debrief ?? null,
     library: s.library.map((l) => ({ id: l.id, workout: renderWorkout(l.workout, p) })),

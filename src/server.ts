@@ -5,10 +5,10 @@ import { extname, join, normalize } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 import { Store } from './store.ts';
 import { addDays, localToday, mondayOf } from './engine/dates.ts';
-import { applyReadiness, customWorkout, discardSnapshot, ensureHorizon, generate, linkActivity, previewWeek, reconcile, sessionSig, snapshot, toIcs, uid, undo, unlinkSession, viewState } from './engine/plan.ts';
+import { applyReadiness, customWorkout, discardSnapshot, ensureHorizon, generate, linkActivity, previewWeek, recordThresholds, reconcile, sessionSig, snapshot, toIcs, uid, undo, unlinkSession, viewState } from './engine/plan.ts';
 import { assessReadiness } from './engine/readiness.ts';
 import { aerobicVersion, applyAdaptations, proposeAdaptations, resized } from './engine/adapt.ts';
-import { analyzeExecution, applyProgress, plannedReps } from './engine/execution.ts';
+import { analyzeExecution, applyProgress, plannedReps, progressKey, revertProgress } from './engine/execution.ts';
 import { buildLeg } from './engine/course.ts';
 import { Intervals, IntervalsError, racesFrom, thresholdsFrom } from './intervals.ts';
 import type { Session } from './engine/types.ts';
@@ -70,6 +70,27 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
    * two consecutive years are empty, so the whole training history is imported; later syncs only
    * refresh the last 60 days and merge.
    */
+  /**
+   * Grade one completed session rep by rep from its activity's detected intervals, and move the
+   * progression level for its workout type. A re-grade replaces the earlier verdict and takes back
+   * whatever progression that one had earned. Custom workouts are graded but have no level to move.
+   */
+  async function gradeSession(x: Session, api: Intervals): Promise<boolean> {
+    const id = x.actual?.activityId;
+    if (!id || !plannedReps(x, s().profile).length) return false;
+    const exec = analyzeExecution(x, await api.activityIntervals(id), s().profile);
+    if (!exec) return false;
+    const progress = (s().progress ??= {});
+    if (x.actual!.exec) { revertProgress(progress, x.workout.code, x.actual!.exec); s().progressLog = (s().progressLog ?? []).filter((e) => e.id !== id); }
+    x.actual!.exec = exec;
+    if (x.workout.code !== 'custom') {
+      const d = applyProgress(progress, x.workout.code, exec);
+      if (d) (s().progressLog ??= []).push({ id, date: x.date, key: progressKey(x.workout.code), delta: d, name: x.workout.name, verdict: exec.verdict });
+      if ((s().progressLog?.length ?? 0) > 80) s().progressLog!.splice(0, s().progressLog!.length - 80);
+    }
+    return true;
+  }
+
   async function sync(full = false) {
     const api = client();
     const t = today();
@@ -83,6 +104,7 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
         if ((s().profile as any)[k] !== v) { (s().profile as any)[k] = v; updated.push(k); }
       }
     }
+    recordThresholds(s(), t);
     if (!s().profile.name && s().intervals.athleteName) s().profile.name = s().intervals.athleteName!;
 
     const acts = new Map(full ? [] : s().activities.map((a) => [a.id, a]));
@@ -123,17 +145,17 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
     const matched = reconcile(s());
     // Grade recently completed key sessions rep by rep; each activity is fetched once.
     let graded = 0;
+    // Ungraded sessions are graded; "could not be graded" is retried for a week, since Intervals.icu
+    // can take a while to detect the intervals in a fresh activity.
     for (const x of s().sessions) {
-      const id = x.actual?.activityId;
-      if (!id || x.actual!.exec || x.date < addDays(t, -21) || graded >= 12 || !plannedReps(x, s().profile).length) continue;
-      try {
-        const exec = analyzeExecution(x, await api.activityIntervals(id), s().profile);
-        if (!exec) continue;
-        x.actual!.exec = exec;
-        applyProgress((s().progress ??= {}), x.workout.code, exec);
-        graded++;
-      } catch (e) { if (!(e instanceof IntervalsError)) throw e; }
+      const e = x.actual?.exec;
+      if (!x.actual?.activityId || graded >= 12) continue;
+      if (e ? !(e.verdict === 'unstructured' && x.date >= addDays(t, -7)) : x.date < addDays(t, -21)) continue;
+      try { if (await gradeSession(x, api)) graded++; } catch (err) { if (!(err instanceof IntervalsError)) throw err; }
     }
+    // Progress that changed will not show in the plan until it is regenerated; do that for athletes who let the plan adapt itself.
+    const progressChanged = JSON.stringify(s().progress ?? {}) !== JSON.stringify(s().progressAtPlan ?? {});
+    if (progressChanged && s().profile.autoAdapt && s().season) { snapshot(s(), 'Re-plan after progression changed'); generate(s(), t, 'future'); }
     if (s().profile.autoAdapt) snapshot(s(), 'Automatic adjustments after sync');
     const adapted = s().profile.autoAdapt ? applyAdaptations(s(), t) : [];
     if (s().profile.autoAdapt && !adapted.length) discardSnapshot(s());
@@ -214,11 +236,14 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
           weeksOff: Math.max(0, Math.min(104, Number(b.comeback?.weeksOff ?? p.comeback.weeksOff) || 0)),
           resumedOn: isDate(b.comeback?.resumedOn) ? b.comeback.resumedOn : undefined,
           note: b.comeback?.note ? String(b.comeback.note).slice(0, 500) : undefined,
+          // The block keeps its start date unless the athlete changes what defines it.
+          planStart: p.comeback.active && !!(b.comeback?.active ?? p.comeback.active) && Number(b.comeback?.weeksOff ?? p.comeback.weeksOff) === p.comeback.weeksOff && !isDate(b.comeback?.resumedOn) ? p.comeback.planStart : undefined,
         },
         strengthEquipment: pickOf(b.strengthEquipment, ['gym', 'home'], p.strengthEquipment),
         autoThresholds: b.autoThresholds === undefined ? p.autoThresholds : !!b.autoThresholds,
         autoAdapt: b.autoAdapt === undefined ? p.autoAdapt : !!b.autoAdapt,
       };
+      recordThresholds(s(), today());
       return { ok: true };
     },
 
@@ -400,8 +425,25 @@ export function createApp(opts: { dataDir: string; today?: () => string; passwor
       const b = await body(req);
       const a = s().activities.find((q) => q.id === id);
       snapshot(s(), `Linking “${a?.name ?? 'activity'}” to a session`);
-      try { return { ok: true, ...linkActivity(s(), String(id), String(b.sessionId ?? '')) }; }
+      let linked: { name: string };
+      try { linked = linkActivity(s(), String(id), String(b.sessionId ?? '')); }
       catch (e: any) { discardSnapshot(s()); throw new HttpError(400, e.message); }
+      // Grade it straight away: the evaluation against the plan should be there the moment it is linked.
+      const x = s().sessions.find((q) => q.id === b.sessionId)!;
+      let graded = false, gradeError: string | undefined;
+      if (s().intervals.apiKey && plannedReps(x, s().profile).length) {
+        try { graded = await gradeSession(x, client()); } catch (e: any) { gradeError = e instanceof IntervalsError ? e.message : 'Could not fetch the activity’s intervals.'; }
+      }
+      return { ok: true, ...linked, graded, gradeError, verdict: x.actual?.exec?.verdict };
+    },
+    // Grade (or re-grade) a linked session against its activity's intervals.
+    'POST /api/sessions/:id/regrade': async (_req, id) => {
+      const x = s().sessions.find((q) => q.id === id);
+      if (!x?.actual?.activityId) throw new HttpError(400, 'This session is not linked to an activity.');
+      if (!plannedReps(x, s().profile).length) throw new HttpError(400, 'This session has no interval targets to grade against.');
+      snapshot(s(), `Re-grading “${x.workout.name}”`);
+      try { await gradeSession(x, client()); } catch (e) { discardSnapshot(s()); throw e; }
+      return { ok: true, verdict: x.actual.exec?.verdict ?? null };
     },
     'DELETE /api/sessions/:id': async (_req, id) => {
       const gone = s().sessions.find((q) => q.id === id);
